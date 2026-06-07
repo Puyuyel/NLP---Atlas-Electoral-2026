@@ -1,0 +1,14 @@
+# Núcleo RAG (todo local/offline)
+sentence-transformers>=3.0.0
+chromadb>=0.5.0
+ollama>=0.3.0
+pdfplumber>=0.11.0
+tqdm>=4.66.0
+langdetect>=1.0.9
+
+# Recolección de datos (YouTube)
+google-api-python-client>=2.130.0   # YouTube Data API (buscar videos + comentarios)
+youtube-transcript-api>=0.6.2       # transcripciones de los videos (declaraciones)
+Flask>=3.0.0                         # interfaz web local (app.py)
+# yt-dlp>=2024.1.0                   # respaldo para transcripciones si YouTube bloquea
+# praw>=7.7.0                        # Reddit (desactivado: su API ya no es práctica para esto)

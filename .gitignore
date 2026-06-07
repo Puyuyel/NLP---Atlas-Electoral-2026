@@ -1,0 +1,21 @@
+# --- Secretos / configuración local (NO subir) ---
+config.py
+.env
+
+# --- Artefactos generados (se recrean con los scripts) ---
+chroma_db/
+data/
+__pycache__/
+*.pyc
+*.pyo
+
+# --- Entornos virtuales ---
+.venv/
+venv/
+env/
+
+# --- Sistema / editor ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
