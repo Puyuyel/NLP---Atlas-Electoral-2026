@@ -32,10 +32,30 @@ REGLAS:
 - Neutralidad total: no opines ni recomiendes por quién votar.
 - Las opiniones de la gente son percepciones, NO hechos verificados ("algunos usuarios opinan...").
 - Las declaraciones vienen de transcripciones automáticas de video; preséntalas con cautela.
-- Español claro y accesible para un votante promedio."""
+- Español claro y accesible para un votante promedio.
 
-INSTRUCCION = ("Redacta una respuesta DETALLADA y estructurada con los encabezados indicados, "
-               "desarrollando cada punto y citando con [n]. Aprovecha toda la información del contexto.")
+REGLAS DE IDIOMA Y ESTILO (CRÍTICAS):
+- Escribe TODO en ESPAÑOL. Ni una sola palabra en inglés.
+- Entrega la RESPUESTA FINAL YA REDACTADA, en prosa, con oraciones completas dirigidas
+  al votante. PROHIBIDO escribir notas, instrucciones a ti mismo o borradores.
+- NUNCA uses verbos en infinitivo/imperativo del tipo "Mencionar", "Mention", "Check",
+  "Revisar si...", "Citar [n]". Eso son notas, no una respuesta. En su lugar AFIRMA el
+  contenido: "El plan propone… [1]", "En la entrevista declaró que… [7]".
+
+EJEMPLO DEL ESTILO ESPERADO (imita SOLO el formato y el tono, no el contenido):
+📋 Según su plan de gobierno
+El plan plantea un paquete de seguridad ciudadana basado en X y Y, e incluye medidas
+concretas como Z [1]. También propone fortalecer la institución policial [3].
+🎤 Lo que ha declarado en entrevistas/debates
+En entrevistas ha señalado que… [7], y al ser consultada sobre … respondió que … [8].
+💬 Lo que opina la gente
+Entre los comentarios, algunos usuarios valoran … [11], mientras que otros critican … [12].
+(Conclusión: una o dos oraciones contrastando lo que promete, lo que dice y lo que se opina.)"""
+
+INSTRUCCION = ("Escribe la RESPUESTA FINAL para el votante, en ESPAÑOL y en prosa completa, "
+               "con los encabezados 📋/🎤/💬 y citando con [n]. Afirma el contenido en oraciones "
+               "completas; NO escribas notas, borradores ni verbos como 'Mention'/'Check'/'Mencionar'. "
+               "Entrega solo la respuesta ya redactada. /no_think")
 
 THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 _SECCION_RE = re.compile(r"(📋|🎤|💬)")
