@@ -4,6 +4,7 @@ Recupera de las 3 colecciones (oficial/declaracion/opinion), reordena con el rer
 y genera una respuesta DETALLADA y estructurada con la LLM local (Ollama).
 """
 import re
+import unicodedata
 
 import chromadb
 import ollama
@@ -11,6 +12,11 @@ from sentence_transformers import CrossEncoder, SentenceTransformer
 
 import config
 from utils_limpieza import menciona_candidato
+
+
+def _quitar_acentos(s):
+    return ''.join(c for c in unicodedata.normalize('NFD', s) if unicodedata.category(c) != 'Mn')
+
 
 SYSTEM_PROMPT = """Eres un asistente electoral NEUTRAL e IMPARCIAL para las Elecciones \
 Generales de Perú 2026. Tu objetivo es que el votante entienda A FONDO a los candidatos.
@@ -94,6 +100,19 @@ class RAG:
         self.reranker = CrossEncoder(config.RERANKER_MODEL)
         client = chromadb.PersistentClient(path=str(config.CHROMA_DIR))
         self.cols = {n: self._get(client, n) for n in ("oficial", "declaracion", "opinion")}
+        self._warmup()
+
+    def _warmup(self):
+        """Pre-carga embedder, reranker y Ollama para que la 1ª consulta real sea rápida."""
+        print("Calentando modelos...", flush=True)
+        self.embedder.encode(["warmup"], normalize_embeddings=True)
+        self.reranker.predict([["warmup", "warmup"]])
+        try:
+            opciones = {"num_predict": 1, "num_ctx": 64}
+            _chat([{"role": "user", "content": "hola"}], opciones)
+            print("Ollama listo.", flush=True)
+        except Exception as e:
+            print(f"Warmup Ollama falló (reintentará en la 1ª consulta): {e}", flush=True)
 
     @staticmethod
     def _get(client, nombre):
@@ -111,11 +130,10 @@ class RAG:
                 return c["nombre"]
         return None
 
-    def _recuperar(self, col, pregunta, candidato):
+    def _recuperar(self, col, emb, candidato):
         if col is None or col.count() == 0:
             return []
-        emb = self.embedder.encode([pregunta], normalize_embeddings=True).tolist()
-        where = {"candidate": candidato} if candidato else None
+        where = {"candidate": _quitar_acentos(candidato)} if candidato else None
         res = col.query(query_embeddings=emb, n_results=config.TOP_K_RETRIEVE, where=where)
         docs, metas = res.get("documents", [[]])[0], res.get("metadatas", [[]])[0]
         return [{"text": d, **m} for d, m in zip(docs, metas)]
@@ -150,26 +168,69 @@ class RAG:
         bloque("### OPINIONES DEL PÚBLICO (comentarios)", op)
         return "\n".join(lineas), fuentes
 
+    def _opciones(self):
+        o = {"temperature": 0.3, "num_ctx": config.OLLAMA_NUM_CTX, "num_predict": config.OLLAMA_NUM_PREDICT}
+        if config.OLLAMA_NUM_GPU is not None:
+            o["num_gpu"] = config.OLLAMA_NUM_GPU
+        return o
+
+    def _recuperar_todos(self, pregunta, candidato):
+        emb = self.embedder.encode([pregunta], normalize_embeddings=True).tolist()
+        of = self._rerank(pregunta, self._recuperar(self.cols.get("oficial"), emb, candidato), config.TOP_K_RERANK)
+        de = self._rerank(pregunta, self._recuperar(self.cols.get("declaracion"), emb, candidato), config.TOP_K_RERANK)
+        op = self._rerank(pregunta, self._recuperar(self.cols.get("opinion"), emb, candidato), config.TOP_K_RERANK)
+        return of, de, op
+
     def responder(self, pregunta):
         """Devuelve {answer, fuentes, candidato}. fuentes = [{n,tipo,ref,url}]."""
         candidato = self.detectar_candidato(pregunta)
-        of = self._rerank(pregunta, self._recuperar(self.cols.get("oficial"), pregunta, candidato), config.TOP_K_RERANK)
-        de = self._rerank(pregunta, self._recuperar(self.cols.get("declaracion"), pregunta, candidato), config.TOP_K_RERANK)
-        op = self._rerank(pregunta, self._recuperar(self.cols.get("opinion"), pregunta, candidato), config.TOP_K_RERANK)
+        of, de, op = self._recuperar_todos(pregunta, candidato)
         if not (of or de or op):
             return {"answer": "No tengo esa información en mi corpus.", "fuentes": [], "candidato": candidato}
 
         contexto, fuentes = self._contexto(of, de, op)
         user = f"CONTEXTO:\n{contexto}\n\nPREGUNTA DEL VOTANTE: {pregunta}\n\n{INSTRUCCION}"
-        opciones = {"temperature": 0.3, "num_ctx": config.OLLAMA_NUM_CTX,
-                    "num_predict": config.OLLAMA_NUM_PREDICT}
-        if config.OLLAMA_NUM_GPU is not None:
-            opciones["num_gpu"] = config.OLLAMA_NUM_GPU
         resp = _chat([{"role": "system", "content": SYSTEM_PROMPT},
-                      {"role": "user", "content": user}], opciones)
+                      {"role": "user", "content": user}], self._opciones())
         msg = resp["message"]
-        content = getattr(msg, "content", None)          # objeto pydantic de ollama
+        content = getattr(msg, "content", None)
         if content is None and isinstance(msg, dict):
             content = msg.get("content", "")
         texto = _limpiar_respuesta(content or "")
         return {"answer": texto, "fuentes": fuentes, "candidato": candidato}
+
+    def responder_stream(self, pregunta):
+        """Generator para SSE. Yields dicts: {status}, {token}, o {done, answer, fuentes, candidato}."""
+        candidato = self.detectar_candidato(pregunta)
+
+        yield {"status": "Buscando en el corpus…"}
+        of, de, op = self._recuperar_todos(pregunta, candidato)
+        if not (of or de or op):
+            yield {"done": True, "answer": "No tengo esa información en mi corpus.",
+                   "fuentes": [], "candidato": candidato}
+            return
+
+        yield {"status": "Generando respuesta…"}
+        contexto, fuentes = self._contexto(of, de, op)
+        user = f"CONTEXTO:\n{contexto}\n\nPREGUNTA DEL VOTANTE: {pregunta}\n\n{INSTRUCCION}"
+        mensajes = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": user}]
+
+        tokens = []
+        try:
+            for chunk in ollama.chat(model=config.OLLAMA_MODEL, messages=mensajes,
+                                     options=self._opciones(), stream=True):
+                token = ""
+                if isinstance(chunk, dict):
+                    token = (chunk.get("message") or {}).get("content", "")
+                else:
+                    msg = getattr(chunk, "message", None)
+                    token = getattr(msg, "content", "") or ""
+                if token:
+                    tokens.append(token)
+                    yield {"token": token}
+        except Exception as e:
+            yield {"done": True, "answer": f"Error al generar: {e}", "fuentes": [], "candidato": candidato}
+            return
+
+        texto = _limpiar_respuesta("".join(tokens))
+        yield {"done": True, "answer": texto, "fuentes": fuentes, "candidato": candidato}

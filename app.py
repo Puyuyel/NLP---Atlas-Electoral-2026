@@ -5,16 +5,21 @@ Levanta un servidor local y abres la página en el navegador.
 Requisitos: pip install flask  (+ todo lo del proyecto y Ollama corriendo)
 Uso:  python app.py   ->  abre http://127.0.0.1:5000
 """
-from flask import Flask, request, jsonify, Response
+import json
+from flask import Flask, request, jsonify, Response, stream_with_context
 
 import config
 from rag import RAG
 
 app = Flask(__name__)
 
+import sys, io
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+
 print("Cargando modelos locales (la 1ª vez descarga pesos, puede tardar)...")
 rag = RAG()
-print("✅ Listo. Abre http://127.0.0.1:5000 en tu navegador.")
+print("Listo. Abre http://127.0.0.1:5000 en tu navegador.")
 
 
 @app.route("/")
@@ -40,6 +45,27 @@ def chat():
         return jsonify(rag.responder(pregunta))
     except Exception as e:
         return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
+
+
+@app.route("/api/chat/stream", methods=["POST"])
+def chat_stream():
+    data = request.get_json(force=True, silent=True) or {}
+    pregunta = (data.get("pregunta") or "").strip()
+    if not pregunta:
+        return jsonify({"error": "Pregunta vacía"}), 400
+
+    def generate():
+        try:
+            for evento in rag.responder_stream(pregunta):
+                yield f"data: {json.dumps(evento, ensure_ascii=False)}\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'error': f'{type(e).__name__}: {e}'}, ensure_ascii=False)}\n\n"
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 PAGINA = r"""<!DOCTYPE html>
@@ -111,6 +137,9 @@ PAGINA = r"""<!DOCTYPE html>
     font-weight:600;cursor:pointer;transition:.15s}
   .send:disabled{background:#cbd0d6;cursor:not-allowed}
   .disclaimer{max-width:860px;margin:8px auto 0;text-align:center;font-size:11px;color:var(--muted)}
+  .status-msg{color:var(--muted);font-style:italic;font-size:13px}
+  .cursor{opacity:.5;animation:blink 1s step-end infinite}
+  @keyframes blink{0%,100%{opacity:.5}50%{opacity:0}}
 </style>
 </head>
 <body>
@@ -198,13 +227,34 @@ async function enviar(){
   add('user',esc(texto)); q.value=''; q.style.height='auto';
   busy=true; send.disabled=true;
   const load=add('bot','<div class="typing"><span></span><span></span><span></span></div>');
+  const bbl=load.querySelector('.bubble');
   try{
-    const r=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},
+    const r=await fetch('/api/chat/stream',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({pregunta:texto})});
-    const data=await r.json();
-    if(data.error){load.querySelector('.bubble').innerHTML='<p>⚠️ '+esc(data.error)+'</p>';}
-    else{load.querySelector('.bubble').innerHTML=fmt(data.answer)+fuentesHTML(data.fuentes);}
-  }catch(e){load.querySelector('.bubble').innerHTML='<p>⚠️ No pude conectar con el servidor.</p>';}
+    if(!r.ok||!r.body){throw new Error('Sin respuesta del servidor');}
+    const reader=r.body.getReader(); const dec=new TextDecoder();
+    let buf='', raw='';
+    while(true){
+      const{done,value}=await reader.read(); if(done) break;
+      buf+=dec.decode(value,{stream:true});
+      const lines=buf.split('\n'); buf=lines.pop();
+      for(const line of lines){
+        if(!line.startsWith('data: ')) continue;
+        let ev; try{ev=JSON.parse(line.slice(6));}catch{continue;}
+        if(ev.status){
+          bbl.innerHTML='<p class="status-msg">'+esc(ev.status)+'</p>';
+        }else if(ev.token){
+          raw+=ev.token;
+          bbl.innerHTML=fmt(raw)+'<span class="cursor">▋</span>';
+          load.scrollIntoView({behavior:'smooth',block:'end'});
+        }else if(ev.done){
+          bbl.innerHTML=fmt(ev.answer||raw)+fuentesHTML(ev.fuentes);
+        }else if(ev.error){
+          bbl.innerHTML='<p>⚠️ '+esc(ev.error)+'</p>';
+        }
+      }
+    }
+  }catch(e){bbl.innerHTML='<p>⚠️ No pude conectar con el servidor.</p>';}
   load.scrollIntoView({behavior:'smooth',block:'end'});
   busy=false; send.disabled=false; q.focus();
 }
@@ -217,4 +267,4 @@ q.addEventListener('input',()=>{q.style.height='auto';q.style.height=Math.min(q.
 
 
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=5000, debug=False)
+    app.run(host="0.0.0.0", port=5000, debug=False)
