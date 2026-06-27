@@ -8,6 +8,7 @@ Embeddings 100% locales con BGE-M3. Uso: python construir_indice.py
 """
 import json
 import sys
+import unicodedata
 
 import chromadb
 import pdfplumber
@@ -16,6 +17,11 @@ from tqdm import tqdm
 
 import config
 from utils_limpieza import limpiar_texto, chunk_texto
+
+
+def _norm(s):
+    """Normaliza nombre de candidato: quita acentos para consistencia en ChromaDB."""
+    return ''.join(c for c in unicodedata.normalize('NFD', s) if unicodedata.category(c) != 'Mn')
 
 
 def candidato_desde_archivo(nombre_archivo):
@@ -84,7 +90,7 @@ def indexar(registros, nombre_col, modelo, client):
     emb = modelo.encode(textos, normalize_embeddings=True, show_progress_bar=True, batch_size=32).tolist()
     ids = [f"{nombre_col}-{i}" for i in range(len(registros))]
     metas = [{
-        "source_type": r.get("source_type", ""), "candidate": r.get("candidate", ""),
+        "source_type": r.get("source_type", ""), "candidate": _norm(r.get("candidate", "")),
         "url": r.get("url", ""), "platform": r.get("platform", ""), "title": r.get("title", ""),
     } for r in registros]
     for i in tqdm(range(0, len(ids), 256), desc=f"add {nombre_col}"):

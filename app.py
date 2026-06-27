@@ -53,10 +53,11 @@ def chat_stream():
     pregunta = (data.get("pregunta") or "").strip()
     if not pregunta:
         return jsonify({"error": "Pregunta vacía"}), 400
+    historial = data.get("historial") or []
 
     def generate():
         try:
-            for evento in rag.responder_stream(pregunta):
+            for evento in rag.responder_stream(pregunta, historial):
                 yield f"data: {json.dumps(evento, ensure_ascii=False)}\n\n"
         except Exception as e:
             yield f"data: {json.dumps({'error': f'{type(e).__name__}: {e}'}, ensure_ascii=False)}\n\n"
@@ -140,6 +141,11 @@ PAGINA = r"""<!DOCTYPE html>
   .status-msg{color:var(--muted);font-style:italic;font-size:13px}
   .cursor{opacity:.5;animation:blink 1s step-end infinite}
   @keyframes blink{0%,100%{opacity:.5}50%{opacity:0}}
+  .btn-new{font-size:12px;border:1px solid var(--line);background:var(--panel);color:var(--muted);
+    border-radius:999px;padding:5px 12px;cursor:pointer;transition:.15s;white-space:nowrap}
+  .btn-new:hover{border-color:var(--accent);color:var(--accent);background:var(--accent-soft)}
+  .ctx-badge{font-size:11px;color:var(--muted);background:var(--accent-soft);color:var(--accent);
+    border-radius:999px;padding:3px 8px;display:none}
 </style>
 </head>
 <body>
@@ -150,6 +156,8 @@ PAGINA = r"""<!DOCTYPE html>
     <p>Plan de gobierno · declaraciones · opinión pública</p>
   </div>
   <span class="badge" id="planos">cargando…</span>
+  <span class="ctx-badge" id="ctx-badge"></span>
+  <button class="btn-new" id="btn-new" title="Borrar historial y empezar una nueva conversación">+ Nueva conversación</button>
 </header>
 
 <main id="main">
@@ -173,8 +181,28 @@ PAGINA = r"""<!DOCTYPE html>
 
 <script>
 const chat=document.getElementById('chat'), intro=document.getElementById('intro'),
-      q=document.getElementById('q'), send=document.getElementById('send');
+      q=document.getElementById('q'), send=document.getElementById('send'),
+      btnNew=document.getElementById('btn-new'), ctxBadge=document.getElementById('ctx-badge');
 let busy=false;
+let historial=[]; // [{role:"user",content:"..."},{role:"assistant",content:"..."}]
+
+function actualizarCtx(){
+  const turns=historial.length/2;
+  if(turns>0){
+    ctxBadge.style.display='inline';
+    ctxBadge.textContent=turns+' turno'+(turns>1?'s':'');
+  } else {
+    ctxBadge.style.display='none';
+  }
+}
+
+btnNew.addEventListener('click',()=>{
+  historial=[];
+  actualizarCtx();
+  chat.innerHTML='';
+  intro.style.display='';
+  q.focus();
+});
 
 const EJEMPLOS=[
   "¿Qué propone Keiko Fujimori en seguridad y qué opina la gente de ella?",
@@ -228,9 +256,10 @@ async function enviar(){
   busy=true; send.disabled=true;
   const load=add('bot','<div class="typing"><span></span><span></span><span></span></div>');
   const bbl=load.querySelector('.bubble');
+  let finalAnswer='';
   try{
     const r=await fetch('/api/chat/stream',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({pregunta:texto})});
+      body:JSON.stringify({pregunta:texto, historial:historial.slice(-6)})});
     if(!r.ok||!r.body){throw new Error('Sin respuesta del servidor');}
     const reader=r.body.getReader(); const dec=new TextDecoder();
     let buf='', raw='';
@@ -248,11 +277,18 @@ async function enviar(){
           bbl.innerHTML=fmt(raw)+'<span class="cursor">▋</span>';
           load.scrollIntoView({behavior:'smooth',block:'end'});
         }else if(ev.done){
-          bbl.innerHTML=fmt(ev.answer||raw)+fuentesHTML(ev.fuentes);
+          finalAnswer=ev.answer||raw;
+          bbl.innerHTML=fmt(finalAnswer)+fuentesHTML(ev.fuentes);
         }else if(ev.error){
           bbl.innerHTML='<p>⚠️ '+esc(ev.error)+'</p>';
         }
       }
+    }
+    // Guardar turno en historial solo si hubo respuesta
+    if(finalAnswer){
+      historial.push({role:'user',content:texto});
+      historial.push({role:'assistant',content:finalAnswer});
+      actualizarCtx();
     }
   }catch(e){bbl.innerHTML='<p>⚠️ No pude conectar con el servidor.</p>';}
   load.scrollIntoView({behavior:'smooth',block:'end'});

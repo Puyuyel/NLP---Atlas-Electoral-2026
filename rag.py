@@ -199,8 +199,11 @@ class RAG:
         texto = _limpiar_respuesta(content or "")
         return {"answer": texto, "fuentes": fuentes, "candidato": candidato}
 
-    def responder_stream(self, pregunta):
-        """Generator para SSE. Yields dicts: {status}, {token}, o {done, answer, fuentes, candidato}."""
+    def responder_stream(self, pregunta, historial=None):
+        """Generator para SSE. Yields dicts: {status}, {token}, o {done, answer, fuentes, candidato}.
+
+        historial: lista de {role, content} con los turnos previos de la conversación (máx 6 msgs).
+        """
         candidato = self.detectar_candidato(pregunta)
 
         yield {"status": "Buscando en el corpus…"}
@@ -213,7 +216,8 @@ class RAG:
         yield {"status": "Generando respuesta…"}
         contexto, fuentes = self._contexto(of, de, op)
         user = f"CONTEXTO:\n{contexto}\n\nPREGUNTA DEL VOTANTE: {pregunta}\n\n{INSTRUCCION}"
-        mensajes = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": user}]
+        turnos_previos = (historial or [])[-6:]  # máximo 3 turnos (6 mensajes)
+        mensajes = [{"role": "system", "content": SYSTEM_PROMPT}] + turnos_previos + [{"role": "user", "content": user}]
 
         tokens = []
         try:
