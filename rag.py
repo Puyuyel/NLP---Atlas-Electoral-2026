@@ -179,6 +179,22 @@ class RAG:
             o["num_gpu"] = config.OLLAMA_NUM_GPU
         return o
 
+    _REFS_PREVIAS = re.compile(
+        r'\b(mismo|misma|ese\s+\w+|en\s+ese|al\s+respecto|sobre\s+eso|'
+        r'igualmente|tambi[eé]n\s+en|el\s+mismo\s+[áa]mbito|ese\s+aspecto|ese\s+tema|'
+        r'el\s+mismo\s+tema|en\s+ese\s+[áa]mbito|sobre\s+el\s+mismo)\b',
+        re.IGNORECASE
+    )
+
+    def _enriquecer_query(self, pregunta, historial):
+        """Añade el contexto de la pregunta anterior cuando la actual es una referencia implícita."""
+        if not historial or not self._REFS_PREVIAS.search(pregunta):
+            return pregunta
+        for msg in reversed(historial):
+            if msg.get("role") == "user":
+                return f"{pregunta} — tema previo: {msg['content']}"
+        return pregunta
+
     def _historial_relevante(self, historial, candidatos):
         """Descarta el historial si ninguno de los candidatos actuales aparece en él."""
         if not historial:
@@ -209,7 +225,7 @@ class RAG:
         """Devuelve {answer, fuentes, candidato}. fuentes = [{n,tipo,ref,url}]."""
         candidatos = self.detectar_candidatos(pregunta)
         candidato = candidatos[0]
-        of, de, op = self._recuperar_todos(pregunta, candidatos)
+        of, de, op = self._recuperar_todos(self._enriquecer_query(pregunta, []), candidatos)
         if not (of or de or op):
             return {"answer": "No tengo esa información en mi corpus.", "fuentes": [], "candidato": candidato}
 
@@ -231,9 +247,11 @@ class RAG:
         """
         candidatos = self.detectar_candidatos(pregunta)
         candidato = candidatos[0]
+        turnos_previos = self._historial_relevante(historial, candidatos)
+        query_emb = self._enriquecer_query(pregunta, turnos_previos)
 
         yield {"status": "Buscando en el corpus…"}
-        of, de, op = self._recuperar_todos(pregunta, candidatos)
+        of, de, op = self._recuperar_todos(query_emb, candidatos)
         if not (of or de or op):
             yield {"done": True, "answer": "No tengo esa información en mi corpus.",
                    "fuentes": [], "candidato": candidato}
@@ -242,7 +260,6 @@ class RAG:
         yield {"status": "Generando respuesta…"}
         contexto, fuentes = self._contexto(of, de, op)
         user = f"CONTEXTO:\n{contexto}\n\nPREGUNTA DEL VOTANTE: {pregunta}\n\n{INSTRUCCION}"
-        turnos_previos = self._historial_relevante(historial, candidatos)
         mensajes = [{"role": "system", "content": SYSTEM_PROMPT}] + turnos_previos + [{"role": "user", "content": user}]
 
         tokens = []
