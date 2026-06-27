@@ -12,6 +12,148 @@ al pipeline RAG: streaming, memoria conversacional, y manejo de comparaciones.
 
 
 ================================================================================
+0. DECISIONES DE ARQUITECTURA Y ALTERNATIVAS DESCARTADAS
+================================================================================
+
+Esta sección documenta el razonamiento detrás de las elecciones técnicas
+clave, incluyendo las opciones evaluadas y los motivos por los que se
+descartaron.
+
+--- 0.1 DÓNDE ALOJAR EL PROYECTO ---
+
+El proyecto requiere correr un LLM local (sin API externa) con velocidad
+razonable para una demo en vivo. Se evaluaron varias opciones:
+
+  OPCIÓN A: AWS Academy (descartada)
+    Motivo: La política IAM Pvoclabs2 del laboratorio de la PUCP bloquea
+    la acción ec2:RunInstances. No es posible lanzar instancias GPU (g4dn,
+    p3) sin permisos de administrador que el laboratorio no otorga a
+    estudiantes. Se exploró la consola web y la CLI sin éxito.
+
+  OPCIÓN B: Google Colab (descartada)
+    Motivo: Colab gratuito tiene sesiones de ~12h y se desconecta en
+    inactividad. Para una demo presencial, una caída del runtime implica
+    ~20 min de reinicio (descarga de modelo, instalación de paquetes).
+    Colab Pro tiene costo. Se dejó como fallback de emergencia pero se
+    abandonó cuando se consiguió GPU en el servidor de la PUCP.
+
+  OPCIÓN C: PC local del equipo (descartada)
+    Motivo: Las laptops del equipo no tienen GPU dedicada con suficiente VRAM
+    para un LLM de calidad aceptable. Con CPU, llama3.1:8b tarda ~3-5 min
+    por respuesta (inaceptable para demo). Modelos más pequeños (1b-3b)
+    generan respuestas de baja calidad que incumplen las instrucciones del
+    SYSTEM_PROMPT.
+
+  OPCIÓN ELEGIDA: Servidor phantom de la PUCP (172.19.4.64)
+    Motivo: El profesor/administrador proporcionó acceso SSH a un servidor
+    con 2x RTX 3080 (10 GB c/u). Con el LLM en GPU el tiempo de respuesta
+    cae a ~12s, adecuado para demo. El servidor corre 24/7 sin interrupciones.
+    Acceso vía SSH 2-hop: laptop → bridge (200.16.4.64) → phantom (172.19.4.64).
+
+--- 0.2 SELECCIÓN DEL MODELO LLM ---
+
+Criterios: velocidad en las GPUs disponibles, calidad de instrucciones en
+español, tamaño que quepa en 20.5 GiB de VRAM.
+
+  MODELOS DESCARTADOS:
+
+  gemma3:27b
+    Problema: 27B parámetros no caben completos en 20.5 GB de VRAM.
+    En modo CPU-offload parcial la velocidad baja a ~6 tok/s y la respuesta
+    tarda +6 min. Inaceptable para demo.
+
+  glm-5.2:cloud (GLM de Zhipu)
+    Problema: Requiere suscripción de pago en la API de Zhipu AI. El equipo
+    no tiene presupuesto para APIs externas. Además rompería el requisito de
+    "100% local/offline".
+
+  gpt-oss:latest (variante open-source vía Ollama)
+    Problema: Timeout en la descarga/inicialización del modelo en el servidor.
+    No se pudo verificar la causa (posiblemente red corporativa de la PUCP
+    bloquea el endpoint de descarga de ese modelo en particular).
+
+  qwen2.5:3b / qwen3:4b (usados en desarrollo local)
+    Pros: Muy rápidos (~100+ tok/s en GPU), pequeños (3-4 GB).
+    Cons: Con 3-4B parámetros, el modelo no sigue consistentemente las
+    instrucciones complejas del SYSTEM_PROMPT. Escribe preámbulos de
+    razonamiento visibles (por eso existe _limpiar_respuesta() con regex).
+    Las respuestas son más cortas y menos estructuradas que con modelos de 8B.
+
+  MODELO ELEGIDO: llama3.1:8b
+    Razón: 8B parámetros entran completos en 20.5 GB de VRAM (el modelo
+    cuantizado Q4_K_M pesa ~4.7 GB). Velocidad ~85-100 tok/s en Vulkan.
+    Tiempo de respuesta completa ~12-15s. Meta LLaMA 3.1 tiene buen
+    desempeño en español y sigue instrucciones complejas con mayor
+    consistencia que los modelos de 3-4B.
+
+--- 0.3 BACKEND GPU: CUDA vs VULKAN ---
+
+  PROBLEMA:
+    El servidor phantom tiene driver NVIDIA versión 535 (CUDA 12.2).
+    Las versiones recientes de Ollama (≥0.26) requieren driver ≥550 para
+    usar CUDA. El Ollama del sistema (v0.21.0) tenía --ollama-engine
+    hardcodeado, forzando modo CPU (~5 tok/s).
+
+  ALTERNATIVAS EVALUADAS:
+
+    Actualizar driver NVIDIA a ≥550
+      Descartado: el servidor es administrado por la PUCP. Sin acceso root
+      para actualizar drivers del sistema. Requeriría solicitud formal al
+      equipo de IT universitario (semanas de espera).
+
+    Usar Ollama v0.21.0 con flag OLLAMA_LLM_LIBRARY
+      Intentado: exportar OLLAMA_LLM_LIBRARY apuntando a libggml-cuda.so.
+      Resultado: el motor seguía usando CPU. La variable de entorno no
+      sobreescribe el motor hardcodeado en esa versión.
+
+    Compilar Ollama desde fuente con CUDA 12.2
+      Descartado: requiere ~30 min de compilación, toolchain complejo
+      (CGO, libcuda headers). Alto riesgo de incompatibilidades. No vale
+      la pena dado que existe otra solución más simple.
+
+  SOLUCIÓN ELEGIDA: Ollama v0.30.11 con Vulkan
+    Vulkan es una API gráfica de bajo nivel (GPU computing) que funciona
+    con drivers NVIDIA ≥470. El driver 535 del servidor es compatible.
+    Ollama v0.30.11 incluye soporte Vulkan y lo detecta automáticamente
+    cuando CUDA no está disponible.
+    Procedimiento:
+      curl -L https://github.com/ollama/ollama/releases/download/v0.30.11/
+           ollama-linux-amd64.tar.zst | tar -xJ -C ~/ollama_new
+    Puerto propio (11435) para no interferir con el Ollama del sistema (11434)
+    que usan otros usuarios del servidor.
+
+--- 0.4 ARQUITECTURA DE DATOS: 3 COLECCIONES vs 1 ---
+
+  ALTERNATIVA DESCARTADA: Una sola colección con metadato source_type
+    Más simple de implementar. Pero impide controlar el balance entre fuentes:
+    si hay 100 opiniones y 10 fragmentos del plan, el reranker priorizaría
+    opiniones siempre. El resultado sería respuestas sesgadas hacia comentarios.
+
+  DECISIÓN ELEGIDA: 3 colecciones separadas (oficial / declaracion / opinion)
+    Cada colección se recupera independientemente con su propio top-k.
+    El contexto siempre incluye fragmentos de los 3 planos si existen,
+    garantizando el contraste plan/declaraciones/opinión que es el valor
+    diferenciador del sistema.
+    Desventaja: construir_indice.py es más complejo. Aceptable dado que
+    la calidad de respuesta es significativamente mejor.
+
+--- 0.5 MEMORIA CONVERSACIONAL: STATEFUL vs STATELESS ---
+
+  ALTERNATIVA: Sesiones en servidor (dict por session_id, Flask-Session)
+    Pros: el frontend no necesita reenviar el historial en cada request.
+    Contras: el servidor acumula estado; si Flask se reinicia (frecuente
+    durante desarrollo), se pierde todo el historial. Escala mal con
+    múltiples usuarios simultáneos.
+
+  DECISIÓN ELEGIDA: Stateless en backend, estado en frontend (JS)
+    El frontend mantiene historial[] en memoria (JS). Cada POST incluye
+    los últimos 6 mensajes. Si Flask se reinicia, la próxima pregunta
+    simplemente envía el historial acumulado en el navegador y la
+    conversación continúa sin interrupción.
+    Alineado con el diseño estándar de chatbots web modernos (ej. ChatGPT).
+
+
+================================================================================
 1. GPU Y MOTOR DE INFERENCIA (Ollama)
 ================================================================================
 
