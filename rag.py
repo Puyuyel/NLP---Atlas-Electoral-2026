@@ -180,9 +180,13 @@ class RAG:
         return o
 
     _REFS_PREVIAS = re.compile(
-        r'\b(mismo|misma|ese\s+\w+|en\s+ese|al\s+respecto|sobre\s+eso|'
-        r'igualmente|tambi[eé]n\s+en|el\s+mismo\s+[áa]mbito|ese\s+aspecto|ese\s+tema|'
-        r'el\s+mismo\s+tema|en\s+ese\s+[áa]mbito|sobre\s+el\s+mismo)\b',
+        r'\b(mismo|misma|'           # "el mismo tema", "la misma área", etc.
+        r'ese\s+\w+|en\s+ese|'       # "ese ámbito", "en ese contexto", "ese tema"
+        r'dicho\s+\w+|'              # "dicho tema", "dicho aspecto"
+        r'al\s+respecto|'            # "al respecto"
+        r'sobre\s+eso|sobre\s+esto|' # "sobre eso", "sobre esto"
+        r'igualmente|'               # "igualmente"
+        r'el\s+mismo\s+\w+)\b',      # "el mismo tópico", "el mismo campo", etc.
         re.IGNORECASE
     )
 
