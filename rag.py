@@ -124,11 +124,16 @@ class RAG:
     def planos_disponibles(self):
         return [n for n, c in self.cols.items() if c is not None and c.count() > 0]
 
-    def detectar_candidato(self, pregunta):
+    def detectar_candidatos(self, pregunta):
+        """Devuelve lista con TODOS los candidatos mencionados (para preguntas de comparación)."""
+        encontrados = []
         for c in config.CANDIDATOS:
             if menciona_candidato(pregunta, c["alias"]) or c["nombre"].lower() in pregunta.lower():
-                return c["nombre"]
-        return None
+                encontrados.append(c["nombre"])
+        return encontrados or [None]
+
+    def detectar_candidato(self, pregunta):
+        return self.detectar_candidatos(pregunta)[0]
 
     def _recuperar(self, col, emb, candidato):
         if col is None or col.count() == 0:
@@ -174,17 +179,37 @@ class RAG:
             o["num_gpu"] = config.OLLAMA_NUM_GPU
         return o
 
-    def _recuperar_todos(self, pregunta, candidato):
+    def _historial_relevante(self, historial, candidatos):
+        """Descarta el historial si ninguno de los candidatos actuales aparece en él."""
+        if not historial:
+            return []
+        nombres = [c for c in candidatos if c]
+        if not nombres:
+            return historial[-6:]
+        texto_hist = " ".join(m.get("content", "") for m in historial).lower()
+        if not any(n.lower() in texto_hist for n in nombres):
+            return []  # candidatos completamente nuevos: empezar fresco
+        return historial[-6:]
+
+    def _recuperar_todos(self, pregunta, candidatos):
+        """candidatos: lista de nombres (puede ser [None]). Recupera por cada uno y combina."""
         emb = self.embedder.encode([pregunta], normalize_embeddings=True).tolist()
-        of = self._rerank(pregunta, self._recuperar(self.cols.get("oficial"), emb, candidato), config.TOP_K_RERANK)
-        de = self._rerank(pregunta, self._recuperar(self.cols.get("declaracion"), emb, candidato), config.TOP_K_RERANK)
-        op = self._rerank(pregunta, self._recuperar(self.cols.get("opinion"), emb, candidato), config.TOP_K_RERANK)
+        of_raw, de_raw, op_raw = [], [], []
+        for cand in candidatos:
+            of_raw.extend(self._recuperar(self.cols.get("oficial"), emb, cand))
+            de_raw.extend(self._recuperar(self.cols.get("declaracion"), emb, cand))
+            op_raw.extend(self._recuperar(self.cols.get("opinion"), emb, cand))
+        k = config.TOP_K_RERANK * max(1, len([c for c in candidatos if c]))
+        of = self._rerank(pregunta, of_raw, k)
+        de = self._rerank(pregunta, de_raw, k)
+        op = self._rerank(pregunta, op_raw, k)
         return of, de, op
 
     def responder(self, pregunta):
         """Devuelve {answer, fuentes, candidato}. fuentes = [{n,tipo,ref,url}]."""
-        candidato = self.detectar_candidato(pregunta)
-        of, de, op = self._recuperar_todos(pregunta, candidato)
+        candidatos = self.detectar_candidatos(pregunta)
+        candidato = candidatos[0]
+        of, de, op = self._recuperar_todos(pregunta, candidatos)
         if not (of or de or op):
             return {"answer": "No tengo esa información en mi corpus.", "fuentes": [], "candidato": candidato}
 
@@ -204,10 +229,11 @@ class RAG:
 
         historial: lista de {role, content} con los turnos previos de la conversación (máx 6 msgs).
         """
-        candidato = self.detectar_candidato(pregunta)
+        candidatos = self.detectar_candidatos(pregunta)
+        candidato = candidatos[0]
 
         yield {"status": "Buscando en el corpus…"}
-        of, de, op = self._recuperar_todos(pregunta, candidato)
+        of, de, op = self._recuperar_todos(pregunta, candidatos)
         if not (of or de or op):
             yield {"done": True, "answer": "No tengo esa información en mi corpus.",
                    "fuentes": [], "candidato": candidato}
@@ -216,7 +242,7 @@ class RAG:
         yield {"status": "Generando respuesta…"}
         contexto, fuentes = self._contexto(of, de, op)
         user = f"CONTEXTO:\n{contexto}\n\nPREGUNTA DEL VOTANTE: {pregunta}\n\n{INSTRUCCION}"
-        turnos_previos = (historial or [])[-6:]  # máximo 3 turnos (6 mensajes)
+        turnos_previos = self._historial_relevante(historial, candidatos)
         mensajes = [{"role": "system", "content": SYSTEM_PROMPT}] + turnos_previos + [{"role": "user", "content": user}]
 
         tokens = []
