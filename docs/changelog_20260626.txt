@@ -1,0 +1,299 @@
+================================================================================
+ATLAS ELECTORAL PERÚ 2026 — CHANGELOG DE SESIÓN
+Fecha: 26/06/2026
+================================================================================
+
+RESUMEN
+-------
+Sesión de deploy y mejoras al servidor PUCP (phantom: 172.19.4.64).
+Se resolvió el problema de GPU (Vulkan), se recolectaron datos de YouTube,
+se indexaron las 3 colecciones de ChromaDB, y se implementaron varias mejoras
+al pipeline RAG: streaming, memoria conversacional, y manejo de comparaciones.
+
+
+================================================================================
+1. GPU Y MOTOR DE INFERENCIA (Ollama)
+================================================================================
+
+PROBLEMA:
+  Ollama v0.21.0 en el servidor incluía el flag --ollama-engine hardcodeado,
+  forzando modo CPU (~5 tok/s con llama3.1:8b).
+
+SOLUCIÓN:
+  Descarga e instalación de Ollama v0.30.11 en ~/ollama_new/bin/ollama.
+  Esta versión detecta las GPUs via Vulkan (el driver CUDA 535 del servidor es
+  anterior a 550, requerido por CUDA; Vulkan sí funciona).
+
+RESULTADO:
+  - Ambas RTX 3080 detectadas: 20.5 GiB VRAM total
+  - llama3.1:8b corre a ~85-100 tok/s (GPU) vs ~5 tok/s (CPU anterior)
+  - Respuestas en ~12-15 s (antes: ~3-5 min)
+
+CONFIGURACIÓN EN SERVIDOR:
+  - Ollama arranca con CUDA_VISIBLE_DEVICES=0,1 y OLLAMA_HOST=127.0.0.1:11435
+  - Script de inicio: /tmp/start_atlas.sh (screen sessions: ollama-rh, atlas)
+  - Modelo: llama3.1:8b
+
+
+================================================================================
+2. DATOS DE YOUTUBE (colectar_opiniones.py)
+================================================================================
+
+DATOS RECOLECTADOS:
+  - 50 videos: 10 por candidato (Keiko, Roberto Sánchez, Belmont, López Aliaga, Nieto)
+  - Sufijos de búsqueda: "entrevista", "debate", "propuestas"
+  - 42 videos con transcripción automática disponible
+  - 8 videos sin transcripción (descartados)
+
+CORPUS GENERADO:
+  - data/opiniones.jsonl:      2,171 comentarios filtrados (YouTube comments)
+  - data/declaraciones.jsonl:  2,934 fragmentos de transcripciones
+
+FILTROS APLICADOS (en colectar_opiniones.py):
+  - Comentarios: mínimo 40 chars, en español, que mencionen al candidato, sin spam
+  - Declaraciones: chunks de 600 chars con 100 chars de solape
+  - Deduplicación por similitud de texto
+
+API: YouTube Data API v3 + youtube-transcript-api para subtítulos
+
+
+================================================================================
+3. INDEXACIÓN (construir_indice.py)
+================================================================================
+
+COLECCIONES CHROMADB — RESULTADO FINAL:
+  oficial      1,573 fragmentos  (5 PDFs de planes de gobierno)
+  declaracion  2,934 fragmentos  (transcripciones de YouTube)
+  opinion      2,171 fragmentos  (comentarios de YouTube)
+  TOTAL:       6,678 fragmentos
+
+CAMBIO EN construir_indice.py:
+  Se agregó _norm(s) para normalizar nombres de candidatos al indexar
+  (quita acentos con unicodedata.NFD). Consistente con _quitar_acentos() en rag.py.
+  Razón: ChromaDB donde-filtros fallan si el nombre almacenado tiene acentos
+  pero el nombre buscado no los tiene o viceversa.
+
+TIEMPO DE INDEXADO:
+  oficial:     ~5 min (50 batches de 32, ~6s/batch en CPU para BGE-M3)
+  declaracion: ~10 min (92 batches)
+  opinion:     ~4 min (68 batches, modelo ya cargado → más rápido)
+  Total:       ~19 min
+
+
+================================================================================
+4. STREAMING SSE (app.py + rag.py)
+================================================================================
+
+IMPLEMENTADO EN: Sprint 1 (commit 334fdde)
+
+CAMBIOS EN rag.py:
+  - responder_stream(pregunta, historial=None): generator que hace yield de dicts
+      {status: "..."}          al inicio de cada fase (buscando, generando)
+      {token: "..."}           por cada token generado por Ollama (stream=True)
+      {done, answer, fuentes, candidato}  al finalizar
+
+  - _warmup(): pre-carga embedder, reranker y Ollama al iniciar (num_predict=1)
+    para eliminar la demora en la primera consulta real
+
+  - _recuperar_todos(pregunta, candidato): calcula el embedding una sola vez
+    y lo reutiliza para las 3 colecciones (antes: 3 cálculos separados)
+
+  - _quitar_acentos(s): normaliza nombres de candidatos al filtrar ChromaDB
+
+CAMBIOS EN app.py:
+  - Nuevo endpoint POST /api/chat/stream con mimetype text/event-stream
+  - JS: fetch() + ReadableStream en lugar de EventSource
+  - Tokens aparecen en pantalla conforme llegan (~3-5s para el primer token)
+  - Flask corre en host=0.0.0.0:5000 (antes: 127.0.0.1, no accesible desde red)
+
+
+================================================================================
+5. MEMORIA CONVERSACIONAL (app.py + rag.py)
+================================================================================
+
+IMPLEMENTADO EN: commit e7cd29b
+
+DISEÑO: stateless en el backend, estado en el frontend.
+  - El frontend mantiene el array historial[] en JS
+  - Cada request POST incluye historial.slice(-6) (últimos 3 turnos = 6 mensajes)
+  - El backend no guarda sesiones; recibe el historial por request
+
+CAMBIOS EN rag.py:
+  responder_stream(pregunta, historial=None):
+    - Recibe historial como lista de {role, content}
+    - Inserta hasta 6 mensajes previos entre el SYSTEM_PROMPT y el user message
+    - Ollama recibe: [system] + [user/assistant × N] + [user actual]
+
+CAMBIOS EN app.py:
+  - /api/chat/stream acepta campo "historial" en el body JSON
+  - JS: historial[] se actualiza tras cada respuesta completada
+  - Botón "Nueva conversación" limpia historial[] y el área de chat
+  - Badge "N turnos activos" en el header muestra el contexto acumulado
+
+PARÁMETRO: OLLAMA_NUM_CTX = 4096 (actualizado de 2048)
+
+
+================================================================================
+6. PARÁMETROS DE GENERACIÓN
+================================================================================
+
+PROBLEMA DETECTADO: Respuestas cortadas al final.
+CAUSA: OLLAMA_NUM_PREDICT = 400 en el servidor (muy poco para respuestas
+       detalladas con 3 secciones + conclusión).
+
+CAMBIO:
+  Servidor config.py: OLLAMA_NUM_PREDICT = 400 → 1024
+  Efecto: respuestas completas con las 3 secciones (📋/🎤/💬) + conclusión
+  Tiempo adicional: ~7s más (~85 tok/s × 600 tokens extra)
+
+
+================================================================================
+7. COMPARACIONES MULTI-CANDIDATO (rag.py)
+================================================================================
+
+IMPLEMENTADO EN: commit f1f5c85
+
+PROBLEMA:
+  - detectar_candidato() devolvía solo el PRIMER candidato encontrado
+  - "Compara A y B" → solo recuperaba documentos de A → LLM no tenía contexto de B
+  - El historial anterior (sobre A y B) contaminaba preguntas sobre C y D
+
+CAMBIOS EN rag.py:
+
+  detectar_candidatos(pregunta):
+    Nueva función que devuelve LISTA con todos los candidatos detectados.
+    Busca todos los alias de todos los candidatos en la pregunta.
+    detectar_candidato() se mantiene como wrapper que retorna el primero.
+
+  _recuperar_todos(pregunta, candidatos):
+    Acepta lista de candidatos.
+    Itera sobre cada candidato haciendo queries separadas a ChromaDB.
+    Combina los resultados antes del reranking.
+    k = TOP_K_RERANK × nro_candidatos (proporcional a la comparación)
+
+  _historial_relevante(historial, candidatos):
+    Nueva función de filtrado de historial.
+    Si ninguno de los candidatos actuales aparece en el texto del historial
+    anterior → devuelve [] (descarta historial).
+    Evita que preguntas sobre C y D hereden contexto de A y B.
+
+FLUJO ACTUALIZADO EN responder_stream():
+  1. detectar_candidatos(pregunta) → lista
+  2. _historial_relevante(historial, candidatos) → turnos_previos
+  3. _enriquecer_query(pregunta, turnos_previos) → query_emb  [ver §8]
+  4. _recuperar_todos(query_emb, candidatos)
+  5. LLM con [system] + turnos_previos + [user con contexto]
+
+
+================================================================================
+8. ENRIQUECIMIENTO DE QUERY PARA PREGUNTAS DE SEGUIMIENTO (rag.py)
+================================================================================
+
+IMPLEMENTADO EN: commits 0aa383e y d0f2dba
+
+PROBLEMA:
+  "y que me dices de la comparación entre Roberto Sánchez y Keiko en el mismo ámbito"
+  → ChromaDB busca "...el mismo ámbito" → no contiene la palabra "educación"
+  → recupera documentos genéricos → LLM fabrica sin base en el corpus
+
+SOLUCIÓN: _enriquecer_query(pregunta, historial)
+  Detecta referencias implícitas al contexto anterior mediante regex.
+  Si encuentra una referencia → concatena la pregunta previa del historial
+  para enriquecer el query de embedding.
+
+  Ejemplo:
+    pregunta actual:  "y sobre el mismo tema, qué dice Keiko?"
+    pregunta previa:  "Compara las propuestas de educación de Roberto y López Aliaga"
+    query enriquecido: "y sobre el mismo tema, qué dice Keiko? — tema previo:
+                        Compara las propuestas de educación de Roberto y López Aliaga"
+
+  Esto da al embedder el contexto semántico necesario para recuperar
+  documentos sobre educación específicamente.
+
+REGEX DE DETECCIÓN (_REFS_PREVIAS):
+  Palabras/frases que activan el enriquecimiento:
+    mismo / misma        → "el mismo tema", "la misma área", "ese mismo aspecto"
+    ese + palabra        → "ese ámbito", "ese contexto", "ese tema"
+    en ese               → "en ese campo", "en ese sentido"
+    dicho + palabra      → "dicho tema", "dicho aspecto"
+    al respecto          → "al respecto"
+    sobre eso/esto       → "sobre eso", "sobre esto"
+    igualmente           → "igualmente"
+    el mismo + palabra   → "el mismo tópico", "el mismo campo"
+
+  El regex opera por PALABRAS SUELTAS (no frases hardcodeadas), por lo que
+  atrapa variaciones arbitrarias: "sobre el mismo tópico", "en ese contexto",
+  "al respecto", etc.
+
+IMPORTANTE: El enriquecimiento afecta solo al EMBEDDING (búsqueda vectorial).
+  El texto original de la pregunta se mantiene en el mensaje al LLM, para que
+  la respuesta siga siendo natural y no incluya el "— tema previo: ..." en el output.
+
+
+================================================================================
+9. ESTADO ACTUAL DEL SISTEMA
+================================================================================
+
+STACK SERVIDOR (phantom.pucp.edu.pe / 172.19.4.64):
+  OS:      Ubuntu (servidor PUCP)
+  GPUs:    2x RTX 3080 (10 GB c/u, 20.5 GiB total via Vulkan)
+  Ollama:  v0.30.11 en ~/ollama_new/bin/ollama, puerto 11435
+  Modelo:  llama3.1:8b (~85-100 tok/s)
+  Flask:   Python 3.10, puerto 5000, host 0.0.0.0
+  ChromaDB: ~/NLP---Atlas-Electoral-2026/chroma_db/
+  Screen:  ollama-rh (Ollama), atlas (Flask)
+
+ACCESO DESDE EXTERIOR:
+  ssh -L 5000:172.19.4.64:5000 bridge@200.16.4.64
+  Luego abrir: http://localhost:5000
+
+PARÁMETROS RAG ACTUALES (servidor config.py):
+  EMBEDDING_MODEL     BAAI/bge-m3
+  RERANKER_MODEL      BAAI/bge-reranker-v2-m3
+  OLLAMA_MODEL        llama3.1:8b
+  OLLAMA_HOST         http://127.0.0.1:11435
+  OLLAMA_NUM_CTX      4096
+  OLLAMA_NUM_PREDICT  1024
+  TOP_K_RETRIEVE      12 por candidato por colección
+  TOP_K_RERANK        5 por candidato por colección (×nro_candidatos en comparaciones)
+  CHUNK_SIZE          600
+  CHUNK_OVERLAP       100
+
+COMMITS DE ESTA SESIÓN:
+  334fdde  Sprint 1: warmup, SSE streaming, fix acentos ChromaDB, Flask 0.0.0.0
+  e7cd29b  Memoria conversacional + YouTube data pipeline
+  f1f5c85  Fix comparaciones multi-candidato y contaminación de historial
+  0aa383e  Enriquecimiento de query para preguntas de seguimiento implícitas
+  d0f2dba  Regex de referencias implícitas más claro y completo
+
+
+================================================================================
+10. PROBLEMAS PENDIENTES / MEJORAS FUTURAS
+================================================================================
+
+  [ ] Umbral mínimo de score en reranker (ver S5 en status20260605.txt)
+      Si score < umbral → devolver "No tengo info relevante" en lugar de fabricar.
+
+  [ ] Indexación incremental (ver S8 en status20260605.txt)
+      Actualmente construir_indice.py borra y recrea todo. Sería mejor upsert
+      para agregar nuevos comentarios/declaraciones sin re-indexar todo.
+
+  [ ] Timeout en llamadas a Ollama (ver S10 en status20260605.txt)
+      Si Ollama no responde, el servidor queda colgado indefinidamente.
+
+  [ ] Actualizar YOUTUBE_API_KEY tras la presentación
+      La key actual fue compartida en texto plano durante el desarrollo.
+      Regenerar en Google Cloud Console después de la presentación.
+
+  [ ] Chunking semántico para PDFs
+      chunk_texto() divide por conteo fijo. Un chunking por párrafos o secciones
+      mejoraría la coherencia de los fragmentos del plan de gobierno.
+
+  [ ] Soporte para preguntas sin candidato explícito
+      "¿Qué propone el de Renovación Popular?" no es detectado por detectar_candidatos()
+      ya que no menciona "López Aliaga" ni sus alias directamente.
+
+
+================================================================================
+FIN DEL CHANGELOG
+================================================================================
