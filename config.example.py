@@ -37,6 +37,7 @@ CHUNK_SIZE = 600
 CHUNK_OVERLAP = 100
 TOP_K_RETRIEVE = 12
 TOP_K_RERANK = 5
+RERANKER_MIN_SCORE = 0.1   # umbral mínimo de relevancia [0-1]; docs por debajo se descartan antes del LLM
 MIN_OPINION_LEN = 40
 
 # --------------------------------------------------------------------------- #

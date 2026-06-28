@@ -207,7 +207,8 @@ class RAG:
         if not items:
             return []
         scores = self.reranker.predict([[pregunta, it["text"]] for it in items])
-        return [it for _, it in sorted(zip(scores, items), key=lambda x: x[0], reverse=True)[:k]]
+        ranked = sorted(zip(scores, items), key=lambda x: x[0], reverse=True)
+        return [it for s, it in ranked if s >= config.RERANKER_MIN_SCORE][:k]
 
     def _contexto(self, of, de, op):
         lineas, fuentes, n = [], [], 0
