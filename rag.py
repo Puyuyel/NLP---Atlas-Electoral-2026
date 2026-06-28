@@ -124,13 +124,30 @@ class RAG:
     def planos_disponibles(self):
         return [n for n, c in self.cols.items() if c is not None and c.count() > 0]
 
-    def detectar_candidatos(self, pregunta):
-        """Devuelve lista con TODOS los candidatos mencionados (para preguntas de comparación)."""
-        encontrados = []
-        for c in config.CANDIDATOS:
-            if menciona_candidato(pregunta, c["alias"]) or c["nombre"].lower() in pregunta.lower():
-                encontrados.append(c["nombre"])
-        return encontrados or [None]
+    def detectar_candidatos(self, pregunta, historial=None):
+        """Devuelve lista con TODOS los candidatos mencionados.
+
+        Si la pregunta no menciona ninguno pero hay historial, intenta heredar
+        el candidato del turno anterior — solo si ese turno era sobre exactamente
+        uno (evita ambigüedad en preguntas de comparación anteriores).
+        """
+        p = pregunta.lower()
+        encontrados = [c["nombre"] for c in config.CANDIDATOS
+                       if menciona_candidato(pregunta, c["alias"]) or c["nombre"].lower() in p]
+        if encontrados:
+            return encontrados
+        # Fallback: heredar candidato del último turno del usuario en el historial
+        if historial:
+            for msg in reversed(historial):
+                if msg.get("role") != "user":
+                    continue
+                prev = msg["content"]
+                inferidos = [c["nombre"] for c in config.CANDIDATOS
+                             if menciona_candidato(prev, c["alias"]) or c["nombre"].lower() in prev.lower()]
+                if len(inferidos) == 1:
+                    return inferidos  # hereda solo si el turno previo era sobre UN candidato
+                break  # solo revisamos el turno de usuario más reciente
+        return [None]
 
     def detectar_candidato(self, pregunta):
         return self.detectar_candidatos(pregunta)[0]
@@ -249,7 +266,7 @@ class RAG:
 
         historial: lista de {role, content} con los turnos previos de la conversación (máx 6 msgs).
         """
-        candidatos = self.detectar_candidatos(pregunta)
+        candidatos = self.detectar_candidatos(pregunta, historial=historial)
         candidato = candidatos[0]
         turnos_previos = self._historial_relevante(historial, candidatos)
         query_emb = self._enriquecer_query(pregunta, turnos_previos)
