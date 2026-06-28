@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Asistente Electoral · Perú 2026</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+
+<header>
+  <div class="logo">PE</div>
+  <div>
+    <h1>Asistente Electoral · Perú 2026</h1>
+    <p>Plan de gobierno · declaraciones · opinión pública</p>
+  </div>
+  <span class="badge" id="planos">cargando…</span>
+  <span class="ctx-badge" id="ctx-badge"></span>
+  <button class="btn-new" id="btn-new" title="Borrar historial y empezar una nueva conversación">+ Nueva conversación</button>
+</header>
+
+<main id="main">
+  <div class="chips" id="chips"></div>
+  <div class="intro" id="intro">
+    <h2>¿Qué quieres saber de los candidatos?</h2>
+    <p>Pregunta en lenguaje natural. Contrasto lo que <b>prometen</b> en su plan, lo que
+       <b>declaran</b> en entrevistas y lo que <b>opina la gente</b>, siempre citando las fuentes.</p>
+    <div class="examples" id="examples"></div>
+  </div>
+  <div id="chat"></div>
+</main>
+
+<div class="composer">
+  <div class="inner">
+    <textarea id="q" rows="1" placeholder="Escribe tu pregunta… (Enter para enviar)"></textarea>
+    <button class="send" id="send">Enviar</button>
+  </div>
+  <div class="disclaimer">Información con fines informativos. Las opiniones de redes son percepciones, no hechos verificados.</div>
+</div>
+
+<script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>
