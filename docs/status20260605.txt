@@ -1,0 +1,495 @@
+================================================================================
+ATLAS ELECTORAL PERÚ 2026 — DIAGNÓSTICO INTEGRAL DEL SISTEMA
+Fecha: 05/06/2026
+Elaborado por: Claude Sonnet 4.6 (revisión de arquitectura y usabilidad)
+================================================================================
+
+ÍNDICE
+------
+1.  Arquitectura general del sistema
+2.  Inventario de archivos y responsabilidades
+3.  Flujo de datos (pipeline completo)
+4.  Diagnóstico de la demora de 5 minutos en la primera consulta
+5.  Diagnóstico del modelo NLP / RAG
+6.  Problemas de usabilidad identificados
+7.  Soluciones propuestas (con prioridad y estimación de esfuerzo)
+8.  Funcionalidades adicionales recomendadas
+9.  Tabla resumen de hallazgos críticos
+10. Próximos pasos sugeridos
+
+
+================================================================================
+1. ARQUITECTURA GENERAL DEL SISTEMA
+================================================================================
+
+El sistema es un chatbot de Recuperación Aumentada por Generación (RAG) que
+combina tres fuentes de información sobre los candidatos a las Elecciones
+Generales de Perú 2026:
+
+  - Planes de gobierno oficiales (PDFs del JNE)
+  - Declaraciones en entrevistas/debates (transcripciones de YouTube)
+  - Opinión pública (comentarios de YouTube)
+
+Todos los componentes corren 100% locales/offline tras la primera descarga
+de pesos de modelos. No se usa ninguna API externa de LLM.
+
+Diagrama de arquitectura:
+
+    PDFs (5 planes) ──────────────────────────────────────┐
+                                                          ├─> construir_indice.py
+    YouTube (comentarios + transcripciones) ──────────────┘       │
+                   vía colectar_opiniones.py                       │
+                                                                   ▼
+                                                        ChromaDB (3 colecciones)
+                                                          oficial / declaracion / opinion
+                                                                   │
+    Usuario ──> Flask (app.py:5000) ──> rag.py ───────────────────┘
+                                            │
+                                            ├─ 1. Detectar candidato mencionado
+                                            ├─ 2. Recuperar top-12 de cada colección (BGE-M3)
+                                            ├─ 3. Reranking top-5 (BGE-reranker-v2-m3)
+                                            ├─ 4. Construir contexto estructurado
+                                            └─ 5. Llamar a Ollama (qwen2.5:3b)
+                                                        │
+                                                        └──> Respuesta JSON con fuentes
+
+
+Modelos usados:
+  - Embeddings:  BAAI/bge-m3 (SentenceTransformer, ~570 MB)
+  - Reranker:    BAAI/bge-reranker-v2-m3 (CrossEncoder)
+  - LLM:         qwen2.5:3b vía Ollama (por defecto en config.example.py)
+                 Alternativa documentada: qwen3:4b / qwen3:8b
+  - Vector DB:   ChromaDB persistente (chroma_db/)
+
+Parámetros clave de RAG:
+  - CHUNK_SIZE        = 600 caracteres
+  - CHUNK_OVERLAP     = 100 caracteres
+  - TOP_K_RETRIEVE    = 12 fragmentos por colección
+  - TOP_K_RERANK      = 5 fragmentos por colección (tras reranking)
+  - OLLAMA_NUM_CTX    = 4096 tokens de ventana de contexto
+  - OLLAMA_NUM_PREDICT= 1024 tokens máx. de respuesta
+
+
+================================================================================
+2. INVENTARIO DE ARCHIVOS Y RESPONSABILIDADES
+================================================================================
+
+  app.py               Servidor Flask. Expone /api/chat (POST) y /api/meta (GET).
+                       Instancia RAG al arrancar. Contiene también el HTML/JS de
+                       la interfaz web en la constante PAGINA.
+
+  rag.py               Núcleo RAG. Clase RAG con métodos:
+                         - __init__: carga embedder, reranker y colecciones Chroma
+                         - responder(pregunta): pipeline completo, retorna dict
+                           {answer, fuentes, candidato}
+                         - _recuperar: busca en una colección con filtro por candidato
+                         - _rerank: ordena fragmentos con CrossEncoder
+                         - _contexto: construye el bloque de contexto para el prompt
+                         - detectar_candidato: alias matching sobre la pregunta
+
+  chatbot.py           Versión de terminal del chatbot. Usa rag.py como backend.
+                       Interfaz tipo REPL: input() -> responder() -> print().
+
+  construir_indice.py  Pipeline de ingesta y vectorización:
+                         - cargar_pdfs(): extrae texto de PDFs con pdfplumber
+                         - cargar_jsonl(): carga declaraciones.jsonl y opiniones.jsonl
+                         - indexar(): crea colecciones en ChromaDB con embeddings BGE-M3
+
+  colectar_opiniones.py Recolección de datos de YouTube vía YouTube Data API v3:
+                         - Busca videos por candidato + sufijos (entrevista, debate...)
+                         - Extrae comentarios  -> data/opiniones.jsonl
+                         - Extrae transcripciones -> data/declaraciones.jsonl
+                         - Respaldo de transcripciones con yt-dlp si YouTube bloquea
+
+  utils_limpieza.py    Utilidades NLP de preprocesamiento:
+                         - limpiar_texto(): URLs, menciones, hashtags, emojis
+                         - limpiar_transcript(): limpieza específica para subtítulos
+                         - chunk_texto(): partición de texto con solape por palabras
+                         - opinion_valida(): filtros de calidad para comentarios
+                         - menciona_candidato(): matching de alias en texto
+
+  config.example.py    Plantilla de configuración. El usuario debe copiarlo a
+                       config.py (en .gitignore) y agregar sus API keys.
+
+  Planes/              5 PDFs de planes de gobierno (nombres como UUIDs del JNE).
+  data/                (generado) opiniones.jsonl + declaraciones.jsonl
+  chroma_db/           (generado) Índice vectorial persistente de ChromaDB
+
+  probar_modelo.py     Script de prueba del modelo (no analizado en detalle).
+  probar_transcript.py Script de prueba de transcripciones (no analizado en detalle).
+
+  PLAN_NUEVO_ENFOQUE.md  Documento de diseño interno que justifica la arquitectura
+                         actual (migración de modelo chico + T5/GPT-2 a LLM local).
+  GUIA_APIS.md           Instrucciones para obtener YouTube y Reddit API keys.
+
+
+================================================================================
+3. FLUJO DE DATOS (PIPELINE COMPLETO)
+================================================================================
+
+FASE 1 — RECOLECCIÓN (ejecutar manualmente, una vez o periódicamente):
+  python colectar_opiniones.py
+    └─> Llama a YouTube Data API
+    └─> Por cada candidato: busca videos con sufijos (entrevista, debate, propuestas)
+    └─> Extrae hasta 300 comentarios por video    -> data/opiniones.jsonl
+    └─> Extrae transcripción (youtube-transcript-api o yt-dlp fallback)
+                                                  -> data/declaraciones.jsonl
+    └─> Aplica filtros: largo mínimo, español, mención del candidato, dedup
+
+FASE 2 — INDEXACIÓN (ejecutar después de recolección o cuando cambian los PDFs):
+  python construir_indice.py
+    └─> Lee 5 PDFs de Planes/ con pdfplumber
+    └─> Lee declaraciones.jsonl y opiniones.jsonl
+    └─> Aplica chunk_texto() a cada texto (600 chars, 100 overlap)
+    └─> Carga SentenceTransformer(BAAI/bge-m3)
+    └─> Calcula embeddings en batches de 32
+    └─> Guarda en ChromaDB: colecciones oficial / declaracion / opinion
+
+FASE 3 — INFERENCIA (por cada consulta del usuario):
+  GET /api/meta  -> retorna candidatos y planos disponibles (para la UI)
+  POST /api/chat -> pregunta -> rag.responder() -> JSON {answer, fuentes, candidato}
+    └─> detectar_candidato(): alias matching sobre la pregunta
+    └─> Por cada colección (oficial, declaracion, opinion):
+          embedder.encode(pregunta)       <- PROBLEMA: se repite 3 veces
+          col.query(embedding, top_k=12, where={candidate})
+    └─> reranker.predict(pregunta, fragmento) para cada fragmento de cada colección
+          -> selecciona top-5 de cada colección
+    └─> _contexto(): numera fragmentos [1]..[n] y construye bloque de texto
+    └─> ollama.chat(SYSTEM_PROMPT, user=contexto+pregunta+instruccion)
+    └─> _limpiar_respuesta(): elimina tags <think>...</think> del razonamiento
+    └─> retorna {answer: texto, fuentes: [{n, tipo, ref, url}], candidato}
+
+
+================================================================================
+4. DIAGNÓSTICO: DEMORA DE 5 MINUTOS EN LA PRIMERA CONSULTA
+================================================================================
+
+CAUSA RAÍZ: No es una sola causa sino cuatro factores encadenados.
+
+--- Causa A (Principal): Ollama no precalienta el modelo LLM ---
+
+  El método RAG.__init__() carga el embedder y el reranker en memoria al
+  arrancar el servidor (app.py:16), pero NUNCA llama a Ollama durante la
+  inicialización. Ollama descarga los pesos del modelo de GPU/RAM cuando no
+  hay actividad. Al llegar la primera consulta real, Ollama debe:
+
+    1. Leer ~2 GB de pesos del disco (qwen2.5:3b en GGUF)
+    2. Asignar memoria GPU o RAM
+    3. Copiar y mapear los pesos
+    4. Ejecutar la inferencia
+
+  En hardware modesto (GPU de 4-6 GB o CPU) esto puede tomar 1 a 3 minutos.
+  Si OLLAMA_NUM_GPU no está configurado y los pesos no caben en la VRAM
+  disponible, Ollama degrada a CPU, lo que puede triplicar el tiempo.
+
+  Solución: agregar un método _warmup() en RAG.__init__() que haga una
+  llamada silenciosa con num_predict=1 para forzar la carga del modelo antes
+  de que llegue la primera consulta del usuario.
+
+--- Causa B: El embedding de la pregunta se calcula 3 veces ---
+
+  En rag.py, el método _recuperar() es llamado una vez por colección
+  (oficial, declaracion, opinion). Cada llamada ejecuta:
+    emb = self.embedder.encode([pregunta], normalize_embeddings=True).tolist()
+
+  BGE-M3 es un modelo pesado. Aunque las llamadas posteriores son más rápidas
+  (el modelo ya está en memoria), se ejecuta innecesariamente 3 veces en lugar
+  de calcular el embedding una sola vez y reutilizarlo.
+
+  Solución: calcular emb = embedder.encode(pregunta) una vez en responder()
+  y pasarlo como parámetro a _recuperar().
+
+--- Causa C (UX): Sin streaming — silencio absoluto mientras el LLM genera ---
+
+  El endpoint /api/chat bloquea hasta que Ollama termina de generar todos los
+  tokens de la respuesta (hasta 1024 tokens). Con qwen2.5:3b en CPU, la
+  generación de una respuesta completa puede tomar 2-4 minutos adicionales.
+  Durante todo ese tiempo la interfaz solo muestra los 3 puntitos animados sin
+  ningún texto parcial visible.
+
+  Solución: implementar streaming vía Server-Sent Events (SSE). El frontend
+  recibe y muestra tokens conforme Ollama los genera, transformando la
+  experiencia de "pantalla en blanco 5 min" a "texto que aparece en segundos".
+
+--- Causa D: Sin warmup del encoder/reranker ---
+
+  Aunque SentenceTransformer y CrossEncoder se instancian en __init__(), la
+  primera inferencia real (primer encode / primer predict) puede tener latencia
+  adicional por inicialización lazy del backend de PyTorch (construcción del
+  grafo computacional). Agregar un encode y predict de prueba al __init__()
+  elimina este overhead de la primera consulta real.
+
+
+================================================================================
+5. DIAGNÓSTICO DEL MODELO NLP / RAG
+================================================================================
+
+FORTALEZAS:
+  [+] BGE-M3 como embedder: excelente elección. Multilingüe (100+ idiomas),
+      estado del arte para español, diseñado para retrieval asimétrico.
+
+  [+] BGE-reranker-v2-m3: correcto. Mejora significativamente la precisión
+      del top-k recuperado. Muchos RAGs omiten este paso y pierden calidad.
+
+  [+] ChromaDB persistente: apropiado para el volumen de datos (miles de
+      chunks). Simple de operar y no requiere infraestructura externa.
+
+  [+] Corpus de 3 planos separados (oficial / declaracion / opinion):
+      buen diseño de ingeniería de datos. Permite contraste explícito entre
+      "lo que promete", "lo que declara" y "lo que opina la gente".
+
+  [+] Sistema de prompts bien estructurado: tiene SYSTEM_PROMPT detallado con
+      reglas de neutralidad, formato de respuesta (secciones 📋/🎤/💬),
+      ejemplos del estilo esperado, y prohibiciones explícitas de inventar.
+
+  [+] Limpieza de texto (utils_limpieza.py): maneja URLs, menciones, hashtags,
+      elongaciones, emojis, timestamps de subtítulos, detección de idioma.
+      Adecuado para la naturaleza ruidosa de los comentarios de YouTube.
+
+DEBILIDADES:
+  [-] Modelo LLM qwen2.5:3b demasiado pequeño:
+      Con 3B parámetros, la capacidad de síntesis y seguimiento de instrucciones
+      complejas es limitada. La existencia de _limpiar_respuesta() con regex
+      para eliminar razonamiento visible es evidencia de que el modelo no sigue
+      consistentemente las instrucciones del prompt. Recomendado: qwen3:8b o
+      mistral-nemo si el hardware lo permite.
+
+  [-] Detección de candidatos frágil (menciona_candidato):
+      Hace un simple substring matching en minúsculas. No maneja:
+        - Variantes sin tilde: "Lopez" vs "López" (parcialmente mitigado por alias)
+        - Preguntas sin nombre: "¿Qué propone el de Renovación Popular?"
+        - Preguntas sobre múltiples candidatos simultáneamente: solo detecta uno
+        - Pronombres o referencias indirectas
+
+  [-] Sin manejo de consultas multi-candidato:
+      responder() detecta un solo candidato. Una pregunta como "Compara a Keiko
+      y López Aliaga en seguridad" solo filtrará por el primero que encuentre.
+
+  [-] Sin validación de score de reranking:
+      Si los fragmentos recuperados tienen score muy bajo (son irrelevantes),
+      el sistema los pasa igualmente al LLM, que puede generar respuestas
+      inventadas o confusas. No hay umbral mínimo de relevancia.
+
+  [-] Chunking no respeta estructura del documento:
+      chunk_texto() divide por conteo de palabras con paso fijo. Un chunk puede
+      empezar a mitad de un párrafo y terminar a mitad de otro. Para planes de
+      gobierno con secciones temáticas, sería mejor chunking por párrafos o
+      secciones.
+
+  [-] Sin historial de conversación:
+      Cada consulta es completamente independiente. No se puede hacer preguntas
+      de seguimiento ("¿Y qué dice sobre eso Belmont?") porque el bot no tiene
+      contexto del intercambio anterior.
+
+  [-] Actualizacion del corpus no es incremental:
+      construir_indice.py borra y recrea las colecciones completas en cada
+      ejecución. Agregar nuevos comentarios/declaraciones requiere re-indexar todo.
+
+
+================================================================================
+6. PROBLEMAS DE USABILIDAD IDENTIFICADOS
+================================================================================
+
+  [U1] CRÍTICO: 5 minutos de espera en la primera consulta sin ningún
+       indicador de lo que está ocurriendo internamente. El usuario no sabe
+       si el sistema está funcionando, colgado, o si su pregunta fue recibida.
+
+  [U2] ALTO: El typing indicator (tres puntitos) se muestra durante toda la
+       espera pero no comunica el estado real (recuperando, rerankeando,
+       generando). Otros chatbots muestran mensajes como "Buscando fuentes..."
+       o tokens parciales mientras generan.
+
+  [U3] MEDIO: No hay botón de cancelar consulta. Si el usuario se equivoca
+       en la pregunta, debe esperar el tiempo completo o recargar la página.
+
+  [U4] MEDIO: Los ejemplos hardcodeados en el JS (EJEMPLOS array en app.py)
+       mencionan candidatos que pueden no tener datos en el corpus actual
+       (ej. "Ricardo Belmont" si no se recolectaron sus declaraciones).
+
+  [U5] BAJO: No hay historial de la sesión. Al recargar la página, las
+       consultas anteriores se pierden. No hay forma de retomar el hilo.
+
+  [U6] BAJO: No hay botón de copiar respuesta ni opción de compartir.
+
+  [U7] BAJO: El badge "Planos: cargando…" en el header queda en ese estado
+       si /api/meta falla o si Ollama no está corriendo al arrancar.
+
+
+================================================================================
+7. SOLUCIONES PROPUESTAS
+================================================================================
+
+--- PRIORIDAD ALTA: Eliminar los 5 minutos de espera ---
+
+  S1. Warmup de Ollama al iniciar el servidor [Esfuerzo: BAJO]
+      Agregar en RAG.__init__() una llamada silenciosa a ollama.chat() con
+      num_predict=1 antes de que Flask empiece a servir peticiones. Esto
+      pre-carga el modelo en GPU/RAM para que la primera consulta real sea rápida.
+
+      Ubicación: rag.py, método __init__() al final, nuevo método _warmup().
+
+      Estimación de ganancia: elimina ~2-3 minutos del primer retraso.
+
+  S2. Streaming de respuesta vía Server-Sent Events [Esfuerzo: MEDIO]
+      Usar ollama.chat(..., stream=True) para recibir tokens conforme se generan
+      y enviarlos al frontend con text/event-stream. El usuario ve texto aparecer
+      en segundos en lugar de esperar la respuesta completa.
+
+      Ubicación:
+        - rag.py: nuevo método responder_stream() con yield de tokens
+        - app.py: nuevo endpoint /api/chat/stream con Response(stream_with_context())
+        - HTML/JS en app.py: cambiar fetch() por EventSource o fetch+ReadableStream
+
+      Estimación de ganancia: la percepción de latencia cae dramáticamente.
+      El usuario ve los primeros tokens en 3-10 segundos.
+
+  S3. Calcular embedding una sola vez por consulta [Esfuerzo: BAJO]
+      Refactorizar _recuperar() para recibir el embedding precalculado como
+      parámetro. En responder(), calcular emb una sola vez y pasarlo a las
+      tres llamadas a _recuperar().
+
+      Ubicación: rag.py, método responder() y nuevo _recuperar_con_emb().
+
+      Estimación de ganancia: ~20-30% de reducción en tiempo de recuperación.
+
+  S4. Warmup del encoder y reranker [Esfuerzo: BAJO]
+      En RAG.__init__() (o en _warmup()), ejecutar:
+        self.embedder.encode(["warmup"], normalize_embeddings=True)
+        self.reranker.predict([["warmup", "warmup"]])
+      para que la primera inferencia real no incluya overhead de inicialización.
+
+      Ubicación: rag.py, método __init__().
+
+--- PRIORIDAD MEDIA: Mejoras de robustez NLP ---
+
+  S5. Umbral mínimo de score en reranker [Esfuerzo: BAJO]
+      Después del reranking, filtrar fragmentos con score por debajo de un
+      umbral configurable (ej. RERANK_MIN_SCORE = -5.0). Si ningún fragmento
+      supera el umbral, devolver "No tengo información relevante sobre eso."
+
+  S6. Detección de múltiples candidatos [Esfuerzo: MEDIO]
+      Modificar detectar_candidato() para devolver una lista en lugar de un
+      solo nombre. En responder(), si hay múltiples candidatos, recuperar de
+      cada uno y estructurar la respuesta como comparación.
+
+  S7. Historial de conversación por sesión [Esfuerzo: MEDIO]
+      Mantener en memoria los últimos 2-3 intercambios por sesión de usuario
+      y pasarlos como contexto adicional a Ollama (mensaje system + history).
+      Permite preguntas de seguimiento naturales.
+
+--- PRIORIDAD BAJA: Mejoras de infraestructura ---
+
+  S8. Indexación incremental [Esfuerzo: MEDIO]
+      En construir_indice.py, implementar upsert (agregar solo documentos
+      nuevos) en lugar de delete+recreate. Permite actualizar el corpus con
+      nuevas opiniones/declaraciones sin re-indexar todo.
+
+  S9. Health check de Ollama al arrancar [Esfuerzo: BAJO]
+      Verificar que Ollama esté corriendo y que el modelo esté disponible
+      antes de que Flask empiece a servir. Si no está disponible, mostrar
+      error claro en lugar de fallo opaco en la primera consulta.
+
+  S10. Timeout en llamadas a Ollama [Esfuerzo: BAJO]
+       Agregar timeout configurable (ej. 120 segundos) en la llamada a
+       ollama.chat() para evitar que el servidor quede colgado indefinidamente
+       si Ollama no responde.
+
+
+================================================================================
+8. FUNCIONALIDADES ADICIONALES RECOMENDADAS
+================================================================================
+
+--- ALTA PRIORIDAD (alineadas al propósito del proyecto) ---
+
+  F1. COMPARADOR DE CANDIDATOS
+      Pregunta: "Compara a Keiko y López Aliaga en educación"
+      Implementación: detectar múltiples candidatos, recuperar de cada uno,
+      construir un prompt de comparación, presentar respuesta en dos columnas.
+      Valor: feature diferenciadora para un votante indeciso.
+
+  F2. INDICADOR DE COBERTURA POR PLANO
+      Mostrar en la respuesta si hay información en los tres planos o solo
+      en algunos. Ejemplo: "ℹ️ Solo encontré información en el plan oficial.
+      No hay declaraciones ni opiniones indexadas para este candidato."
+      Implementación: usar los resultados de _recuperar() antes del reranking.
+
+  F3. HISTORIAL DE SESIÓN
+      Guardar el historial de la conversación en localStorage del navegador.
+      Permite releer intercambios anteriores y retomarlos al recargar.
+      (Ver también S7 para historial como contexto del LLM)
+
+--- MEDIA PRIORIDAD (enriquecen la experiencia) ---
+
+  F4. DASHBOARD DE TEMAS POR CANDIDATO
+      Página extra que muestre automáticamente qué temas tiene cada candidato
+      con más cobertura en el corpus (por frecuencia de palabras clave o
+      clusters de embeddings).
+
+  F5. DETECTOR DE CONTRADICCIONES
+      Comparar sistemáticamente lo que dice el plan oficial vs. las declaraciones
+      del mismo candidato e identificar divergencias. El prompt ya pide señalarlas
+      pero no hay lógica estructurada para detectarlas antes del LLM.
+
+  F6. EXPLORADOR DE FUENTES
+      Panel lateral que permita explorar los fragmentos del corpus directamente,
+      sin pasar por el LLM. Útil para verificación académica y para depuración.
+
+--- BAJA PRIORIDAD / FUTURO ---
+
+  F7. Exportar resumen comparativo en PDF
+  F8. Caché de consultas frecuentes (evitar llamadas repetidas a Ollama)
+  F9. Métricas de uso anónimas (qué candidatos y temas se consultan más)
+  F10. Soporte básico de preguntas en quechua (relevante para el contexto peruano)
+
+
+================================================================================
+9. TABLA RESUMEN DE HALLAZGOS CRÍTICOS
+================================================================================
+
+  PROBLEMA                                      IMPACTO    ESFUERZO   SOLUCIÓN
+  ──────────────────────────────────────────── ──────────  ─────────  ─────────
+  Ollama sin precalentamiento (5 min 1ra vez)   CRÍTICO     BAJO       S1
+  Sin streaming (silencio total mientras genera) CRÍTICO    MEDIO      S2
+  Embedding calculado 3 veces por consulta       ALTO       BAJO       S3
+  Modelo 3B insuficiente para instrucciones      ALTO       MEDIO*     —
+  Sin historial de conversación                  MEDIO      MEDIO      S7
+  Detección de candidatos frágil                 MEDIO      MEDIO      S6
+  Sin consultas multi-candidato                  MEDIO      MEDIO      S6
+  Sin umbral de relevancia en reranker           MEDIO      BAJO       S5
+  Chunking no respeta estructura del documento   BAJO       ALTO       —
+  Sin health check de Ollama                     BAJO       BAJO       S9
+  Sin timeout en llamadas a Ollama               BAJO       BAJO       S10
+  Indexación no incremental                      BAJO       MEDIO      S8
+
+  (*) Requiere hardware adecuado: qwen3:8b necesita ~6-8 GB de VRAM.
+
+
+================================================================================
+10. PRÓXIMOS PASOS SUGERIDOS
+================================================================================
+
+Sprint 1 — Eliminar la demora crítica (estimado: 2-4 horas):
+  1. Implementar S1 (warmup de Ollama en RAG.__init__)
+  2. Implementar S3 y S4 (embedding una vez + warmup de encoders)
+  3. Implementar S2 (streaming SSE)
+  4. Agregar estados de progreso en el frontend durante la espera
+
+Sprint 2 — Robustez NLP (estimado: 4-8 horas):
+  5. Implementar S5 (umbral mínimo de relevancia)
+  6. Implementar S6 (detección de múltiples candidatos)
+  7. Implementar S7 (historial de conversación por sesión)
+
+Sprint 3 — Funcionalidades nuevas (estimado: 8-16 horas):
+  8. Implementar F1 (comparador de candidatos)
+  9. Implementar F2 (indicador de cobertura por plano)
+  10. Implementar F3 (historial de sesión en localStorage)
+
+Sprint 4 — Infraestructura (estimado: 4-6 horas):
+  11. Implementar S8 (indexación incremental)
+  12. Implementar S9 y S10 (health check y timeout de Ollama)
+  13. Evaluar upgrade de modelo a qwen3:8b según hardware disponible
+
+
+================================================================================
+FIN DEL DOCUMENTO
+================================================================================
