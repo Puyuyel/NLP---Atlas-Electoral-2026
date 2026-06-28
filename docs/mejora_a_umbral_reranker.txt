@@ -1,0 +1,99 @@
+================================================================================
+ATLAS ELECTORAL PERÚ 2026 — MEJORA A: UMBRAL MÍNIMO DE RELEVANCIA EN RERANKER
+Fecha: 28/06/2026
+Commit: 1840888
+================================================================================
+
+
+PROPÓSITO
+---------
+Antes de esta mejora, el pipeline RAG siempre enviaba documentos al LLM
+independientemente de su relevancia real. Si el usuario hacía una pregunta
+fuera del corpus (tema no electoral, pregunta genérica, consulta sobre un
+tema que ningún candidato menciona), el reranker igual devolvía los
+"mejores" documentos disponibles — que podían ser completamente irrelevantes
+a la pregunta — y el LLM intentaba responder con ellos, generando respuestas
+inventadas o genéricas que sonaban plausibles pero no tenían base real.
+
+La mejora introduce un umbral mínimo de score: si ningún documento recuperado
+supera ese umbral, el sistema responde "No tengo información relevante" sin
+llegar a invocar al LLM.
+
+
+CALIBRACIÓN DEL UMBRAL
+-----------------------
+Antes de fijar el valor, se midieron los scores reales del reranker
+(BAAI/bge-reranker-v2-m3) en el servidor phantom con casos representativos:
+
+  Pregunta ON-TOPIC + documento relevante  →  score: 0.9992
+  Pregunta ON-TOPIC + documento de ruido   →  score: 0.0000
+  Pregunta OFF-TOPIC + cualquier documento →  score: 0.0000
+
+El modelo es muy binario: los scores se concentran cerca de 0 o cerca de 1,
+con poco espacio intermedio. Esto facilita la elección del umbral: cualquier
+valor entre 0.05 y 0.5 produce el mismo resultado en la práctica.
+
+Se eligió RERANKER_MIN_SCORE = 0.1 como valor conservador:
+  - Bien por encima de 0.0 (ruido confirmado).
+  - Suficientemente bajo para no excluir docs genuinamente relevantes
+    que podrían puntuar en el rango 0.1 – 0.5 en casos borderline.
+
+
+IMPLEMENTACIÓN
+--------------
+El cambio es una sola línea en _rerank() dentro de rag.py:
+
+  ANTES:
+    return [it for _, it in sorted(zip(scores, items), ...)[:k]]
+
+  DESPUÉS:
+    ranked = sorted(zip(scores, items), key=lambda x: x[0], reverse=True)
+    return [it for s, it in ranked if s >= config.RERANKER_MIN_SCORE][:k]
+
+El filtro se aplica DESPUÉS de ordenar por score y ANTES de tomar top-k.
+Esto significa que si los 12 documentos recuperados tienen score < 0.1,
+_rerank() devuelve una lista vacía.
+
+_recuperar_todos() llama a _rerank() por cada colección (oficial,
+declaracion, opinion). Si las tres devuelven [], la guardia en
+responder_stream() se activa:
+
+  if not (of or de or op):
+      yield {"done": True, "answer": "No tengo esa información en mi corpus.", ...}
+      return
+
+Esta guardia ya existía para el caso en que ChromaDB no devolvía resultados.
+Ahora también cubre el caso en que devuelve resultados pero ninguno es
+relevante. No fue necesario añadir código nuevo en responder_stream().
+
+Comportamiento por colección: si "oficial" no supera el umbral pero
+"opinion" sí, el LLM recibe solo las opiniones. Las secciones sin
+resultados muestran "(sin resultados relevantes)" como ya ocurría antes.
+Esto es correcto — un candidato puede tener opiniones del público pero
+no haber mencionado el tema en entrevistas indexadas.
+
+
+EFECTO EN LA DEMO
+-----------------
+  Pregunta fuera de tema (ANTES): el LLM genera una respuesta genérica
+    o inventada que no cita ninguna fuente real. Puede sonar plausible
+    pero es incorrecta. Tiempo de respuesta: ~12s.
+
+  Pregunta fuera de tema (DESPUÉS): el sistema responde inmediatamente
+    "No tengo esa información en mi corpus." sin invocar al LLM.
+    Tiempo de respuesta: < 1s (solo el tiempo del reranker).
+
+  Preguntas normales: comportamiento idéntico al anterior. Los scores
+    relevantes están en el rango 0.9 – 1.0, muy por encima del umbral.
+
+
+ARCHIVOS MODIFICADOS
+--------------------
+  rag.py            _rerank(): filtro por RERANKER_MIN_SCORE
+  config.example.py RERANKER_MIN_SCORE = 0.1
+  config.py         mismo valor aplicado en servidor phantom (en .gitignore)
+
+
+================================================================================
+FIN DEL DOCUMENTO
+================================================================================
