@@ -3,7 +3,11 @@ Núcleo RAG reutilizable (lo usan chatbot.py y app.py).
 Recupera de las 3 colecciones (oficial/declaracion/opinion), reordena con el reranker
 y genera una respuesta DETALLADA y estructurada con la LLM local (Ollama).
 """
+import concurrent.futures
+import queue
 import re
+import threading
+import time
 import unicodedata
 
 import chromadb
@@ -86,12 +90,51 @@ def _limpiar_respuesta(texto: str) -> str:
 
 
 def _chat(messages, opciones):
-    """Llama a Ollama intentando desactivar el 'thinking' de qwen3 (más texto útil)."""
-    try:
-        return ollama.chat(model=config.OLLAMA_MODEL, messages=messages,
-                           options=opciones, think=False)
-    except TypeError:
-        return ollama.chat(model=config.OLLAMA_MODEL, messages=messages, options=opciones)
+    """Llama a Ollama con timeout. Lanza TimeoutError si no responde a tiempo."""
+    def _call():
+        try:
+            return ollama.chat(model=config.OLLAMA_MODEL, messages=messages,
+                               options=opciones, think=False)
+        except TypeError:
+            return ollama.chat(model=config.OLLAMA_MODEL, messages=messages, options=opciones)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+        fut = ex.submit(_call)
+        try:
+            return fut.result(timeout=config.OLLAMA_TIMEOUT)
+        except concurrent.futures.TimeoutError:
+            raise TimeoutError(f"Ollama no respondió en {config.OLLAMA_TIMEOUT}s")
+
+
+def _stream_ollama(mensajes, opciones):
+    """Genera chunks de Ollama con deadline total. Lanza TimeoutError si se cuelga."""
+    q = queue.Queue()
+
+    def _run():
+        try:
+            for chunk in ollama.chat(model=config.OLLAMA_MODEL, messages=mensajes,
+                                     options=opciones, stream=True):
+                q.put(chunk)
+            q.put(None)  # centinela de fin
+        except Exception as e:
+            q.put(e)
+
+    threading.Thread(target=_run, daemon=True).start()
+    deadline = time.monotonic() + config.OLLAMA_TIMEOUT
+
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError(f"Ollama no respondió en {config.OLLAMA_TIMEOUT}s")
+        try:
+            item = q.get(timeout=min(remaining, 5.0))
+        except queue.Empty:
+            raise TimeoutError(f"Ollama no respondió en {config.OLLAMA_TIMEOUT}s")
+        if item is None:
+            return
+        if isinstance(item, Exception):
+            raise item
+        yield item
 
 
 class RAG:
@@ -285,8 +328,7 @@ class RAG:
 
         tokens = []
         try:
-            for chunk in ollama.chat(model=config.OLLAMA_MODEL, messages=mensajes,
-                                     options=self._opciones(), stream=True):
+            for chunk in _stream_ollama(mensajes, self._opciones()):
                 token = ""
                 if isinstance(chunk, dict):
                     token = (chunk.get("message") or {}).get("content", "")
@@ -296,6 +338,10 @@ class RAG:
                 if token:
                     tokens.append(token)
                     yield {"token": token}
+        except TimeoutError as e:
+            yield {"done": True, "answer": f"⏱️ El servidor tardó demasiado en responder. Intenta de nuevo en unos segundos.",
+                   "fuentes": [], "candidato": candidato}
+            return
         except Exception as e:
             yield {"done": True, "answer": f"Error al generar: {e}", "fuentes": [], "candidato": candidato}
             return

@@ -28,6 +28,7 @@ OLLAMA_MODEL = "qwen2.5:3b"                       # SIN modo 'thinking': rápido
 OLLAMA_NUM_GPU = None   # None = usar GPU (auto). 0 = forzar CPU. Un nº = capas a GPU (offload parcial).
 OLLAMA_NUM_CTX = 4096   # ventana de contexto; 4096 va justo para 4 GB de VRAM (súbelo si tienes más)
 OLLAMA_NUM_PREDICT = 1024   # largo máx. de la respuesta (más alto = respuestas más detalladas)
+OLLAMA_TIMEOUT = 90         # segundos máx. para que Ollama responda (streaming o no); evita que Flask quede colgado
 
 # --------------------------------------------------------------------------- #
 # Parámetros de chunking y recuperación
