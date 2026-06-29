@@ -6,30 +6,40 @@ const CANDS = [
   {
     id: 'keiko', name: 'Keiko Fujimori', party: 'Fuerza Popular',
     initials: 'KF', cv: 'cv-keiko',
+    photo: 'img/candidates/keiko-fujimori.jpg',
+    partyLogo: 'img/parties/fuerza-popular.png',
     bio: 'Excandidata presidencial en tres ocasiones (2011, 2016, 2021) y líder de Fuerza Popular. Su propuesta combina economía social de mercado, mano dura en seguridad y defensa de la familia tradicional.',
     sent: { pos: 38, neg: 54 }
   },
   {
     id: 'sanchez', name: 'Roberto Sánchez', party: 'Juntos por el Perú',
     initials: 'RS', cv: 'cv-sanchez',
+    photo: 'img/candidates/roberto-sanchez.jpg',
+    partyLogo: 'img/parties/juntos-por-el-peru.png',
     bio: 'Exministro de Comercio Exterior y Turismo del gobierno de Pedro Castillo. Representa la izquierda democrática con énfasis en derechos laborales, transición ecológica y reforma del Estado.',
     sent: { pos: 42, neg: 35 }
   },
   {
     id: 'belmont', name: 'Ricardo Belmont', party: 'Partido Cívico Obras',
     initials: 'RB', cv: 'cv-belmont',
+    photo: 'img/candidates/ricardo-belmont.jpg',
+    partyLogo: 'img/parties/partido-civico-obras.png',
     bio: 'Empresario de medios y exalcalde de Lima (1990-1995). Propone un enfoque pragmático de centro-derecha, centrado en gestión eficiente, grandes obras de infraestructura y reducción de la burocracia.',
     sent: { pos: 45, neg: 30 }
   },
   {
     id: 'lopez', name: 'Rafael López Aliaga', party: 'Renovación Popular',
     initials: 'RL', cv: 'cv-lopez',
+    photo: 'img/candidates/rafael-lopez-aliaga.jpg',
+    partyLogo: 'img/parties/renovacion-popular.png',
     bio: 'Empresario del transporte y líder de Renovación Popular. Su plataforma es ultraliberal en economía (reducción drástica del Estado, privatizaciones) y conservadora en valores sociales.',
     sent: { pos: 31, neg: 58 }
   },
   {
     id: 'nieto', name: 'Jorge Nieto', party: 'Partido del Buen Gobierno',
     initials: 'JN', cv: 'cv-nieto',
+    photo: 'img/candidates/jorge-nieto.jpg',
+    partyLogo: 'img/parties/partido-del-buen-gobierno.png',
     bio: 'Politólogo, exministro de Defensa y académico. Perfil técnico-reformista de centro, enfocado en reforma de justicia, modernización del Estado y política social basada en evidencia.',
     sent: { pos: 51, neg: 28 }
   },
@@ -237,6 +247,30 @@ const t   = key => T[state.lang][key] ?? key;
 const gc  = id  => CANDS.find(c => c.id === id);
 const tl  = tp  => state.lang === 'qu' ? tp.qu : tp.es;
 
+function staticUrl(relPath) {
+  return `/static/${String(relPath).replace(/^\/+/, '')}`;
+}
+
+function avatarHtml(c, sizeClass = 'avatar-lg') {
+  const src = staticUrl(c.photo || '');
+  return `
+    <span class="avatar ${sizeClass} avatar-photo cv-${c.id}">
+      <img src="${esc(src)}" alt="${esc(c.name)}"
+           onerror="this.closest('.avatar-photo').classList.add('is-fallback');this.remove();">
+      <span class="avatar-fallback">${esc(c.initials)}</span>
+    </span>`;
+}
+
+function partyLogoHtml(c, sizeClass = 'party-logo-md') {
+  const src = staticUrl(c.partyLogo || '');
+  return `
+    <span class="party-logo ${sizeClass} cv-${c.id}">
+      <img src="${esc(src)}" alt="${esc(c.party)}"
+           onerror="this.closest('.party-logo').classList.add('is-fallback');this.remove();">
+      <span class="party-logo-fallback">${esc(c.party.slice(0, 2))}</span>
+    </span>`;
+}
+
 function esc(s) {
   return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 }
@@ -354,7 +388,7 @@ function renderHome() {
     <div class="home-cands-grid">
       ${CANDS.map(c => `
         <button class="home-cand-chip cv-${c.id}" data-cand="${c.id}">
-          <span class="avatar cv-${c.id}">${c.initials}</span>
+          ${avatarHtml(c, 'avatar-chip')}
           ${c.name.split(' ').slice(0, 2).join(' ')}
         </button>`).join('')}
     </div>`;
@@ -374,10 +408,13 @@ function renderCands() {
       ${CANDS.map(c => `
         <div class="cand-card cv-${c.id}" data-cand="${c.id}">
           <div class="cand-card-hd">
-            <span class="avatar avatar-lg">${c.initials}</span>
+            ${avatarHtml(c, 'avatar-lg')}
             <div>
               <div class="cand-card-name">${c.name}</div>
-              <div class="cand-card-party">${c.party}</div>
+              <div class="cand-card-partyline">
+                ${partyLogoHtml(c)}
+                <span>${c.party}</span>
+              </div>
             </div>
           </div>
           <div class="cand-card-bio">${c.bio}</div>
@@ -408,10 +445,16 @@ function renderPerfil() {
   scr.innerHTML = `
     <button class="back-btn" data-action="goCands">${t('perfilBack')}</button>
     <div class="perfil-hero cv-${c.id}">
-      <span class="avatar avatar-xl">${c.initials}</span>
+      ${avatarHtml(c, 'avatar-xl')}
       <div>
         <div class="perfil-name">${c.name}</div>
-        <div class="perfil-party">${c.party}</div>
+        <div class="perfil-partywrap">
+          ${partyLogoHtml(c, 'party-logo-lg')}
+          <div>
+            <div class="perfil-party">${c.party}</div>
+            <div class="perfil-party-note">Logo del partido</div>
+          </div>
+        </div>
         <p class="perfil-bio">${c.bio}</p>
       </div>
     </div>
