@@ -1,0 +1,141 @@
+================================================================================
+ATLAS ELECTORAL PERÚ 2026 — DECISIONES DE DISEÑO: UI "BRÚJULA ELECTORAL"
+================================================================================
+Sesión: 28/06/2026
+Archivos afectados: templates/index.html, static/css/style.css, static/js/app.js
+
+
+CONTEXTO
+--------
+Se reemplazó la UI simple de chatbot (una sola pantalla) por un diseño completo
+de 5 pantallas basado en el prototipo "Brújula Electoral 2026" (archivo
+"Brujula Electoral 2026 - standalone.html" en la raíz, formato Claude Design).
+
+
+DECISIÓN 1 — TECNOLOGÍA: VANILLA JS, SIN FRAMEWORKS
+-----------------------------------------------------
+  Elegido: JavaScript puro (DOM manual + estado global)
+  Descartado: React, Vue, Alpine.js
+
+  Por qué: el prototipo usa componentes Claude Design (<x-dc>, <sc-if>) que
+  requieren su propio runtime. Reescribir en un framework añadiría un build
+  step innecesario. Para 5 pantallas estáticas con estado simple, vanilla JS
+  es suficiente y evita dependencias.
+
+  Patrón implementado:
+    - estado global (objeto 'state')
+    - render() por pantalla, reconstruye innerHTML completo
+    - delegación de eventos en document (data-action, data-nav, etc.)
+    - streaming SSE: actualización directa del bubble (no rebuild por token)
+
+
+DECISIÓN 2 — FUENTES: GOOGLE FONTS (NO ASSETS BASE64)
+-------------------------------------------------------
+  Elegido: @import de Google Fonts (Newsreader + Public Sans)
+  Descartado: los fonts base64 del bundle Claude Design
+
+  Por qué: el bundle Claude Design incluye los fonts embebidos en base64,
+  pero requieren el runtime del Design System para funcionar correctamente.
+  Google Fonts es más ligero y funciona en cualquier browser moderno.
+
+
+DECISIÓN 3 — TEMAS Y COLORES: CSS CUSTOM PROPERTIES + OKLCH
+-------------------------------------------------------------
+  Tokens implementados en :root (tema 'civic', claro):
+    --bg, --surface, --surface2, --ink, --ink2, --ink3, --line, --masthead
+
+  Tema 'editorial' (oscuro) vía [data-theme="editorial"] en <html>.
+
+  Colores de candidatos con oklch() para cobertura de gamut amplio:
+    .cv-lopez:   oklch(0.56 0.11 233)   — azul
+    .cv-keiko:   oklch(0.56 0.145 52)   — dorado
+    .cv-belmont: oklch(0.56 0.004 250)  — gris-azul
+    .cv-nieto:   oklch(0.56 0.135 92)   — verde
+    .cv-sanchez: oklch(0.56 0.13 150)   — esmeralda
+
+  En tema oscuro se usa la variante de mayor luminosidad (--ca-d / --cs-d).
+
+
+DECISIÓN 4 — CALCULADORA DE AFINIDAD: LÓGICA LOCAL
+----------------------------------------------------
+  Implementado: comparación local de respuestas vs. matriz STANCE hardcodeada.
+  Descartado (fase 1): llamadas al RAG backend para calcular afinidad.
+
+  Matriz STANCE (índice de postura 0=conservador … 3=progresista):
+    lopez:   [0, 0, 0, 0, 1, 0, 0, 0]
+    keiko:   [1, 0, 1, 1, 1, 1, 1, 0]
+    belmont: [1, 1, 1, 1, 2, 1, 2, 1]
+    nieto:   [2, 2, 2, 2, 2, 2, 1, 2]
+    sanchez: [3, 3, 3, 2, 3, 3, 3, 3]
+
+  Temas (8): economia, seguridad, educacion, salud, cultura, ambiente,
+             empleo, corrupcion.
+
+  Scoring: número de coincidencias exactas entre respuesta del usuario
+  e índice del candidato. Porcentaje = coincidencias / 8 * 100.
+
+
+DECISIÓN 5 — CHATBOT: PRESERVAR STREAMING SSE EXISTENTE
+---------------------------------------------------------
+  Se mantuvo exactamente el protocolo SSE de rag.py:
+    {status}                     → mensaje de estado interim
+    {token}                      → chunk de texto streaming
+    {done, answer, fuentes}      → respuesta final con fuentes
+    {error}                      → error del servidor
+
+  Historial: últimos 6 mensajes del usuario → backend (igual que antes).
+  La función fmt() preserva el formateo con emojis (📋 🎤 💬) y bold.
+  Las fuentes soportan objetos {n, tipo, ref, url} Y strings simples.
+
+
+DECISIÓN 6 — PERFILES DE CANDIDATOS: POSTURAS ILUSTRATIVAS (FASE 1)
+---------------------------------------------------------------------
+  En pantalla PERFIL, la tabla "Propuestas por tema" muestra las opciones
+  de la matriz STANCE (mismo texto que las opciones de la calculadora).
+
+  Fase 2 pendiente (ver TAREA 5 en status20260628.txt):
+    Nuevo endpoint /api/candidatos/<id>/propuestas que consulta el RAG
+    y devuelve resúmenes reales del plan de gobierno por cada tema.
+
+
+DECISIÓN 7 — IDIOMA QUECHUA: UI PARCIAL
+-----------------------------------------
+  El toggle ES/QU traduce solo los textos de la interfaz (navegación,
+  botones, labels) — no el contenido generado por el LLM ni las respuestas
+  del chatbot. Los textos quechua en el objeto T son aproximaciones
+  ilustrativas, no traducción oficial.
+
+
+ESTRUCTURA DE ARCHIVOS
+-----------------------
+  templates/index.html  — estructura estática (masthead, screens vacíos,
+                          composer, footer). ~60 líneas. Sin lógica.
+  static/css/style.css  — tokens, layout, componentes (~450 líneas).
+                          Sin !important ni inline styles.
+  static/js/app.js      — constantes + estado + renders + streaming + events
+                          (~750 líneas). Sin dependencias externas.
+
+  El HTML tiene 5 divs de screen (#screen-home … #screen-calc) que el JS
+  puebla con innerHTML. El masthead y footer son estáticos.
+
+
+IDs/DATA-ATRIBUTOS CLAVE QUE EL JS ESPERA EN EL HTML
+------------------------------------------------------
+  #disclaimer-text      — <p> del disclaimer strip (se actualiza con lang)
+  #screen-{nombre}      — 5 divs de pantalla
+  #composer             — div fijo del input de chat
+  #composer-input       — <textarea>
+  #composer-send        — botón enviar
+  data-nav="..."        — botones del masthead (home/candidatos/chat/calc)
+  data-nav-label="..."  — mismos botones (para actualizar texto al cambiar lang)
+  data-theme-toggle="..." — botones de tema (civic/editorial)
+  data-lang-toggle="..."  — botones de idioma (es/qu)
+
+
+PENDIENTE (TAREA 5)
+--------------------
+  - Endpoint /api/candidatos/<id>/propuestas (RAG por tema)
+  - Reemplazar posturas ilustrativas por datos reales del plan de gobierno
+  - Cachear respuestas RAG por candidato+tema para evitar latencia en cada visita
+
+================================================================================

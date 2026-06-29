@@ -1,0 +1,198 @@
+================================================================================
+ATLAS ELECTORAL PERÚ 2026 — STATUS DE SESIÓN 28/06/2026
+================================================================================
+
+OBJETIVO DE LA SESIÓN
+----------------------
+Implementar el nuevo diseño de UI (Claude Design "Brújula Electoral 2026")
+sobre el proyecto Flask existente, reemplazando la UI simple de chatbot.
+
+--------------------------------------------------------------------------------
+ESTADO ACTUAL DEL PROYECTO (inicio de implementación UI)
+--------------------------------------------------------------------------------
+
+ESTRUCTURA DE ARCHIVOS (local + servidor phantom):
+  C:\NLP---Atlas-Electoral-2026\
+  ├── app.py                    ← Flask, 75 líneas, LISTO (no modificar)
+  ├── rag.py                    ← RAG pipeline, mejoras A/B/C aplicadas
+  ├── config.py                 ← (en .gitignore, tiene API keys)
+  ├── config.example.py         ← plantilla con todos los parámetros
+  ├── templates/
+  │   └── index.html            ← HTML actual (simple chatbot, PENDIENTE REEMPLAZAR)
+  ├── static/
+  │   ├── css/style.css         ← CSS actual (simple, PENDIENTE REEMPLAZAR)
+  │   └── js/app.js             ← JS actual con SSE streaming (PENDIENTE REEMPLAZAR)
+  ├── Brujula Electoral 2026 - standalone.html  ← Archivo Claude Design (624KB)
+  └── docs/
+      ├── mejora_a_umbral_reranker.txt
+      ├── mejora_b_deteccion_candidatos.txt
+      ├── mejora_c_timeout_ollama.txt
+      ├── status20260605.txt
+      └── status20260628.txt   ← este archivo
+
+SERVIDOR: phantom (172.19.4.64) vía bridge (200.16.4.64)
+  Acceso: Python paramiko con ProxyJump (ver scratchpad/deploy_restructura.py)
+  Flask corriendo en screen 'atlas', puerto 5000
+  Ollama en puerto 11435, modelo llama3.1:8b, ~85 tok/s
+
+BACKEND APIs disponibles:
+  GET  /api/meta              → { candidatos: [...], planos: [...] }
+  POST /api/chat              → respuesta no-streaming (JSON)
+  POST /api/chat/stream       → SSE streaming: {status}, {token}, {done, answer, fuentes}, {error}
+    Body: { pregunta: string, historial: [{role, content}, ...] }
+
+--------------------------------------------------------------------------------
+TAREA PENDIENTE: IMPLEMENTAR NUEVA UI
+--------------------------------------------------------------------------------
+
+LA TAREA PRINCIPAL es reemplazar templates/index.html, static/css/style.css y
+static/js/app.js con la implementación completa del diseño "Brújula Electoral 2026".
+
+DECISIONES YA TOMADAS:
+1. El diseño viene del archivo "Brujula Electoral 2026 - standalone.html" (raíz del proyecto).
+   El template fue extraído al scratchpad como design_template.html (870 líneas).
+   El archivo tiene formato Claude Design con componentes <x-dc>, <sc-if>, <sc-for>.
+
+2. Implementación: Vanilla JS puro (NO React, NO frameworks). Convertir la
+   lógica DCLogic/React del template a estado + DOM manual.
+
+3. Para las fuentes: usar Google Fonts (Newsreader + Public Sans), NO los assets
+   base64 del bundle Claude Design (requieren runtime propio).
+
+4. CALCULADORA DE AFINIDAD: usar la matriz STANCE hardcodeada del diseño
+   (coincidencia de opciones predefinidas) como primera fase. NO hacer llamadas
+   al backend para esto — es comparación local de índices.
+
+   La matriz STANCE del diseño:
+     lopez:   [0, 0, 0, 0, 1, 0, 0, 0]   (opción conservadora en casi todo)
+     keiko:   [1, 0, 1, 1, 1, 1, 1, 0]
+     belmont: [1, 1, 1, 1, 2, 1, 2, 1]
+     nieto:   [2, 2, 2, 2, 2, 2, 1, 2]   (perfil técnico, centro)
+     sanchez: [3, 3, 3, 2, 3, 3, 3, 3]   (izquierda)
+
+   Los 8 temas (TOPICS): economia, seguridad, educacion, salud, cultura,
+   ambiente, empleo, corrupcion — cada uno con 4 opciones.
+
+5. CHATBOT en la nueva UI: conectar al /api/chat/stream existente. Preservar
+   el formato SSE y la lógica de historial (últimos 6 mensajes).
+   Los "ejemplo questions" usarán el backend real (NO las respuestas hardcodeadas
+   del design demo).
+
+6. PERFILES DE CANDIDATOS: "propuestas por tema" serán ilustrativas en primera
+   fase (mismas opciones del STANCE). En próxima fase se reemplazará por
+   preguntas al RAG backend para obtener resúmenes reales de los planes.
+
+--------------------------------------------------------------------------------
+PALETA Y TOKENS DE COLOR
+--------------------------------------------------------------------------------
+
+TEMAS:
+  civic (claro):
+    --bg: #F4F1EA    --surface: #FFFFFF   --surface2: #FBF9F4
+    --ink: #211E18   --ink2: #5C564B      --ink3: #938C7D
+    --line: #E5DFD2  --masthead: #211E18
+
+  editorial (oscuro):
+    --bg: #15130E    --surface: #211E17   --surface2: #1B1812
+    --ink: #F2EEE3   --ink2: #B4AD9C      --ink3: #827B6B
+    --line: #332F25  --masthead: #0D0C08
+
+Colores de candidatos (oklch):
+  Light accent:  oklch(0.56 {chr} {hue})
+  Dark accent:   oklch(0.74 {chr} {hue})
+  Light soft bg: oklch(0.955 min(chr,0.03) {hue})
+  Dark soft bg:  oklch(0.30  min(chr,0.05) {hue})
+
+  lopez:   hue=233, chr=0.11   (azul)
+  keiko:   hue=52,  chr=0.145  (dorado)
+  belmont: hue=250, chr=0.004  (gris-azul)
+  nieto:   hue=92,  chr=0.135  (verde)
+  sanchez: hue=150, chr=0.13   (verde esmeralda)
+
+--------------------------------------------------------------------------------
+ESTRUCTURA DE PANTALLAS (SPA)
+--------------------------------------------------------------------------------
+
+5 screens, mostrar/ocultar con CSS (display:none → block):
+  1. HOME       — hero + 2 cards (asistente / calculadora) + mini-grid candidatos
+  2. CANDIDATOS — grid 2 columnas con bigCard de cada candidato
+  3. PERFIL     — detalle de 1 candidato + tabla de propuestas por tema
+  4. CHAT       — chatbot conectado al backend SSE
+  5. CALC       — quiz (tabs por tema + question card) + RESULTS (ranking + breakdown)
+
+Header fijo:
+  - Logo "Brújula / 2026" en Newsreader
+  - Nav: Inicio | Candidatos | Asistente | Calculadora
+  - Toggle idioma: ES / QU (quechua, solo textos de UI)
+  - Toggle tema: Cívico / Editorial
+
+Disclaimer strip bajo header:
+  "Plataforma de demostración · Las posturas mostradas son ilustrativas..."
+
+Footer:
+  "Brújula Electoral 2026" | "Herramienta cívica independiente..."
+
+--------------------------------------------------------------------------------
+DATOS DE CANDIDATOS (DESDE config.py — IDs ajustados al diseño)
+--------------------------------------------------------------------------------
+
+config.CANDIDATOS tiene 5 candidatos en este orden:
+  Keiko Fujimori         (Fuerza Popular)
+  Roberto Sánchez        (Juntos por el Perú)
+  Ricardo Belmont        (Partido Cívico Obras)
+  Rafael López Aliaga    (Renovación Popular)
+  Jorge Nieto            (Partido del Buen Gobierno)
+
+NOTA: El diseño usa partido "Obras" para Belmont y "El Buen Gobierno" para Nieto.
+La config usa "Partido Cívico Obras" y "Partido del Buen Gobierno". Usar config
+como fuente de verdad para los nombres de partido.
+
+--------------------------------------------------------------------------------
+LO QUE FALTA HACER (próxima sesión)
+--------------------------------------------------------------------------------
+
+TAREA 1 — Escribir static/css/style.css (nuevo):
+  - Reset + base
+  - Google Fonts import (Newsreader + Public Sans)
+  - CSS variables (--bg, --surface, etc. — civic por defecto)
+  - Layout: masthead, disclaimer strip, main, footer
+  - Clases de componentes: .card, .avatar, .pill, .chat-bubble, .calc-tab, etc.
+  - Responsive básico
+
+TAREA 2 — Escribir static/js/app.js (nuevo, completo):
+  - Constantes: CANDS, TOPICS, STANCE, BIOS, SENT (mock), T (traducciones es/qu)
+  - Estado global: { screen, lang, theme, candidate, topic, answers, custom, showResult,
+    chatInput, messages, chatHistory }
+  - applyTheme(theme) → actualiza CSS variables en :root
+  - render() → actualiza DOM de todas las secciones activas
+  - Navegación: goHome/goCandidatos/goChat/goCalc/openCand
+  - Chat: enviarMensaje() con fetch /api/chat/stream, SSE streaming, historial
+  - Calc: choose(key,idx), nextTopic, prevTopic, viewResult, restart
+  - Init: setup listeners, render inicial
+
+TAREA 3 — Escribir templates/index.html (nuevo):
+  - Estructura completa con todos los IDs/data-* que necesita el JS
+  - Jinja2 url_for() solo para CSS y JS
+  - Un div por screen (id="screen-home", "screen-candidatos", etc.)
+  - Contenedores vacíos para candidatos/mensajes/tabs (JS los puebla)
+
+TAREA 4 — Deploy al servidor phantom:
+  - Usar deploy_restructura.py como base (ya en scratchpad)
+  - Subir 3 archivos: templates/index.html, static/css/style.css, static/js/app.js
+  - Reiniciar screen atlas
+
+TAREA 5 (futura) — Perfiles reales vía RAG:
+  - Nuevo endpoint /api/candidatos/<id>/propuestas
+  - Consulta al RAG por cada tema (educacion, economia, etc.)
+  - Cachear resultados en JSON para evitar latencia en cada visita
+
+================================================================================
+ACCESO AL SERVIDOR
+================================================================================
+
+Script de deploy en: C:\Users\LENOVO\AppData\Local\Temp\claude\...\scratchpad\deploy_restructura.py
+Requiere paramiko instalado.
+Bridge: bridge@200.16.4.64  pass: h4l0h0m0r4pucp
+Phantom: rholguin@172.19.4.64  pass: holguin
+Proyecto en servidor: /home/rholguin/NLP---Atlas-Electoral-2026/
+================================================================================

@@ -1,41 +1,81 @@
 <!DOCTYPE html>
 <html lang="es">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Asistente Electoral · Perú 2026</title>
-<link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Brújula Electoral 2026 — Compara candidatos presidenciales del Perú">
+  <title>Brújula Electoral 2026</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
 </head>
 <body>
 
-<header>
-  <div class="logo">PE</div>
-  <div>
-    <h1>Asistente Electoral · Perú 2026</h1>
-    <p>Plan de gobierno · declaraciones · opinión pública</p>
+<!-- ── Masthead fijo ──────────────────────────────────────────────────── -->
+<header class="masthead">
+
+  <span class="logo-mark" data-action="goHome" tabindex="0" role="button" aria-label="Ir al inicio">
+    <em>Brújula</em><sup>2026</sup>
+  </span>
+
+  <nav class="mh-nav" aria-label="Navegación principal">
+    <button class="nav-link" data-nav="home"       data-nav-label="navHome">Inicio</button>
+    <button class="nav-link" data-nav="candidatos" data-nav-label="navCands">Candidatos</button>
+    <button class="nav-link" data-nav="chat"       data-nav-label="navChat">Asistente</button>
+    <button class="nav-link" data-nav="calc"       data-nav-label="navCalc">Calculadora</button>
+  </nav>
+
+  <div class="mh-controls" role="group" aria-label="Idioma y tema">
+    <button class="toggle-btn active" data-lang-toggle="es"      aria-pressed="true">ES</button>
+    <button class="toggle-btn"        data-lang-toggle="qu"      aria-pressed="false">QU</button>
+    <span aria-hidden="true"
+          style="display:inline-block;width:1px;height:18px;background:rgba(255,255,255,.18);margin:0 4px;flex-shrink:0"></span>
+    <button class="toggle-btn active" data-theme-toggle="civic"      aria-pressed="true">Cívico</button>
+    <button class="toggle-btn"        data-theme-toggle="editorial"  aria-pressed="false">Editorial</button>
   </div>
-  <span class="badge" id="planos">cargando…</span>
-  <span class="ctx-badge" id="ctx-badge"></span>
-  <button class="btn-new" id="btn-new" title="Borrar historial y empezar una nueva conversación">+ Nueva conversación</button>
+
 </header>
 
-<main id="main">
-  <div class="chips" id="chips"></div>
-  <div class="intro" id="intro">
-    <h2>¿Qué quieres saber de los candidatos?</h2>
-    <p>Pregunta en lenguaje natural. Contrasto lo que <b>prometen</b> en su plan, lo que
-       <b>declaran</b> en entrevistas y lo que <b>opina la gente</b>, siempre citando las fuentes.</p>
-    <div class="examples" id="examples"></div>
-  </div>
-  <div id="chat"></div>
-</main>
+<!-- ── Disclaimer strip ───────────────────────────────────────────────── -->
+<div class="disclaimer-strip" role="note">
+  <p id="disclaimer-text">
+    Plataforma de demostración · Las posturas mostradas son ilustrativas,
+    basadas en declaraciones y planes públicos disponibles.
+  </p>
+</div>
 
-<div class="composer">
-  <div class="inner">
-    <textarea id="q" rows="1" placeholder="Escribe tu pregunta… (Enter para enviar)"></textarea>
-    <button class="send" id="send">Enviar</button>
+<!-- ── Contenido principal ────────────────────────────────────────────── -->
+<div class="page-wrapper">
+
+  <main>
+    <!-- Cada screen se puebla con JS vía renderXxx() -->
+    <div id="screen-home"       class="screen active"></div>
+    <div id="screen-candidatos" class="screen"></div>
+    <div id="screen-perfil"     class="screen"></div>
+    <div id="screen-chat"       class="screen"></div>
+    <div id="screen-calc"       class="screen"></div>
+  </main>
+
+  <footer>
+    <span class="footer-brand">Brújula Electoral 2026</span>
+    <span>Herramienta cívica independiente · Solo con fines informativos</span>
+  </footer>
+
+</div>
+
+<!-- ── Composer fijo (visible solo en pantalla Chat) ─────────────────── -->
+<div class="composer" id="composer" aria-label="Campo de pregunta al asistente">
+  <div class="composer-inner">
+    <textarea id="composer-input"
+              rows="1"
+              placeholder="Escribe tu pregunta…"
+              aria-label="Escribe tu pregunta"
+              autocomplete="off"
+              spellcheck="true"></textarea>
+    <button class="composer-send" id="composer-send" disabled aria-label="Enviar pregunta">
+      Enviar
+    </button>
   </div>
-  <div class="disclaimer">Información con fines informativos. Las opiniones de redes son percepciones, no hechos verificados.</div>
 </div>
 
 <script src="{{ url_for('static', filename='js/app.js') }}"></script>
