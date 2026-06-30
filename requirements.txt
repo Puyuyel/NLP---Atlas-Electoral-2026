@@ -10,5 +10,6 @@ langdetect>=1.0.9
 google-api-python-client>=2.130.0   # YouTube Data API (buscar videos + comentarios)
 youtube-transcript-api>=0.6.2       # transcripciones de los videos (declaraciones)
 Flask>=3.0.0                         # interfaz web local (app.py)
+deep-translator>=1.11.4              # traducción ES<->quechua (Google Translate) cuando se activa QU; requiere internet
 # yt-dlp>=2024.1.0                   # respaldo para transcripciones si YouTube bloquea
 # praw>=7.7.0                        # Reddit (desactivado: su API ya no es práctica para esto)

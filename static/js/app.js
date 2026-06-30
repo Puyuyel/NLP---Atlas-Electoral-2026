@@ -665,7 +665,7 @@ async function enviarMensaje(texto) {
     const resp = await fetch('/api/chat/stream', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ pregunta: texto.trim(), historial: state.chatHistory.slice(-6) }),
+      body: JSON.stringify({ pregunta: texto.trim(), historial: state.chatHistory.slice(-6), lang: state.lang }),
     });
     if (!resp.ok || !resp.body) throw new Error(`HTTP ${resp.status}`);
 
