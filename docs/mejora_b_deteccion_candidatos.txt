@@ -1,0 +1,110 @@
+================================================================================
+ATLAS ELECTORAL PERÚ 2026 — MEJORA B: DETECCIÓN AMPLIADA DE CANDIDATOS
+Fecha: 28/06/2026
+Commit: 4dbb71d
+================================================================================
+
+
+PROPÓSITO
+---------
+El sistema necesita saber a qué candidato se refiere el usuario para filtrar
+los documentos en ChromaDB y recuperar solo los fragmentos relevantes. Sin
+ese filtro, la búsqueda devuelve resultados mezclados de todos los candidatos
+y las respuestas pierden precisión.
+
+Antes de esta mejora, la detección fallaba en dos escenarios frecuentes:
+
+  1. SEGUIMIENTOS SIN NOMBRE EXPLÍCITO
+     El usuario pregunta sobre Keiko, recibe una respuesta, y luego pregunta
+     "¿y en economía?" o "¿qué más propone?". La segunda pregunta no menciona
+     a ningún candidato, así que el sistema buscaba sin filtro y devolvía
+     documentos mezclados.
+
+  2. APODOS Y NOMBRES ALTERNATIVOS
+     El usuario escribe "Porky" (apodo muy conocido de López Aliaga),
+     "fujimorismo" o "la señora K" — referencias que no coincidían con
+     ninguno de los alias registrados y por lo tanto no se detectaban.
+
+
+IMPLEMENTACIÓN
+--------------
+
+--- CAPA 1: Fallback por historial (rag.py) ---
+
+La función detectar_candidatos() recibió un nuevo parámetro opcional
+`historial`. El flujo es:
+
+  a) Primero busca el candidato en la pregunta actual (comportamiento previo).
+  b) Si no encuentra ninguno Y hay historial disponible, revisa el turno de
+     usuario más reciente en el historial.
+  c) Si ese turno mencionaba exactamente UN candidato, lo hereda como candidato
+     implícito de la pregunta actual.
+  d) Si ese turno mencionaba más de uno (comparación), NO hereda — sería
+     ambiguo decidir cuál de los dos aplica al seguimiento.
+
+La función responder_stream() ya recibía el historial como parámetro; ahora
+lo pasa también a detectar_candidatos(), cerrando el ciclo.
+
+El resto del pipeline (recuperación en ChromaDB, reranking, generación) opera
+exactamente igual — solo cambia qué candidato se usa como filtro.
+
+Ejemplo de conversación que ahora funciona:
+  Usuario:   "¿Qué propone Keiko en seguridad ciudadana?"
+  Asistente: (respuesta detallada sobre Keiko)
+  Usuario:   "¿y qué dice sobre educación?"
+             → detectar_candidatos() no encuentra ningún candidato en
+               "¿y qué dice sobre educación?", revisa el historial,
+               ve que el turno anterior mencionaba solo a Keiko,
+               y hereda "Keiko Fujimori" como candidato implícito.
+
+--- CAPA 2: Apodos y aliases ampliados (config.example.py + config.py) ---
+
+Se agregaron referencias alternativas al diccionario de aliases de cada
+candidato. La función menciona_candidato() ya hacía búsqueda por substring
+sobre la lista de aliases, así que solo fue necesario ampliar las listas:
+
+  Keiko Fujimori:
+    Agregados: "fujimorismo", "fujimorista", "señora k", "la k"
+    Razón: referencias ideológicas y apodos de uso frecuente en medios y redes.
+
+  Rafael López Aliaga:
+    Agregados: "porky", "rpa"
+    Razón: "Porky" es el apodo más conocido a nivel popular; "RPA" es la
+    abreviación usada en titulares y análisis electorales.
+
+Los aliases existentes ya cubrían los nombres de partido ("Renovación Popular",
+"Fuerza Popular", etc.), por lo que no fue necesario duplicarlos.
+
+Nota: se eligieron apodos inequívocos. Referencias ambiguas como "el de la
+derecha" o nombres de pila solos ("López", "Ricardo") se descartaron para
+evitar falsos positivos.
+
+
+ARCHIVOS MODIFICADOS
+--------------------
+  rag.py            detectar_candidatos() + llamada en responder_stream()
+  config.example.py aliases de Keiko y López Aliaga
+  config.py         mismo cambio aplicado directamente en servidor phantom
+                    (config.py está en .gitignore por contener YOUTUBE_API_KEY)
+
+
+LIMITACIONES QUE PERMANECEN
+----------------------------
+  - El fallback por historial solo mira el ÚLTIMO turno del usuario. Si el
+    usuario habló de Keiko hace dos turnos y luego hubo un intercambio sobre
+    otro tema, el contexto de Keiko ya no se hereda.
+
+  - Referencias puramente descriptivas ("el candidato de izquierda", "el más
+    joven", "el que ganó el debate") siguen sin detectarse. Resolverlas
+    requeriría un clasificador semántico o razonamiento del LLM, lo cual
+    aumentaría la latencia de forma significativa.
+
+  - Apodos que no se agregaron por ser ambiguos: "el chino" (Belmont, pero
+    también usado para otras personas), "López" solo (podría referir a otro
+    López en otro contexto), "la K" se agregó pero puede generar falsos
+    positivos en textos que usen "la K" para otra cosa.
+
+
+================================================================================
+FIN DEL DOCUMENTO
+================================================================================

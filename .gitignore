@@ -1,6 +1,7 @@
 # --- Secretos / configuración local (NO subir) ---
 config.py
 .env
+# Nota: scripts/creds.enc SÍ se sube (está cifrado, es seguro)
 
 # --- Artefactos generados (se recrean con los scripts) ---
 chroma_db/

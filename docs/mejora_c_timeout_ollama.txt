@@ -1,0 +1,103 @@
+================================================================================
+ATLAS ELECTORAL PERÚ 2026 — MEJORA C: TIMEOUT EN LLAMADAS A OLLAMA
+Fecha: 28/06/2026
+Commit: cb5c525
+================================================================================
+
+
+PROPÓSITO
+---------
+Antes de esta mejora, si Ollama dejaba de responder (proceso colgado,
+reinicio del servidor, sobrecarga de GPU), la llamada a ollama.chat()
+esperaba indefinidamente. Flask quedaba bloqueado para todos los usuarios
+hasta que el proceso fuera reiniciado manualmente — un escenario crítico
+en una demo en vivo.
+
+La mejora garantiza que cualquier llamada a Ollama tiene un tiempo máximo
+de espera (OLLAMA_TIMEOUT = 90s). Si vence, el usuario recibe un mensaje
+de error claro en lugar de ver la pantalla congelada.
+
+
+IMPLEMENTACIÓN
+--------------
+Hay dos puntos de llamada a Ollama en rag.py con características distintas,
+por lo que cada uno requirió una estrategia diferente.
+
+--- _chat() — llamada no-streaming ---
+
+Usado por responder() y _warmup(). La lógica original era una llamada
+bloqueante directa. Ahora se ejecuta en un ThreadPoolExecutor con un
+hilo worker:
+
+  with ThreadPoolExecutor(max_workers=1) as ex:
+      fut = ex.submit(_call)
+      return fut.result(timeout=config.OLLAMA_TIMEOUT)
+
+Si fut.result() lanza TimeoutError (del módulo concurrent.futures),
+la función la transforma en un TimeoutError estándar con mensaje descriptivo.
+El hilo worker queda como daemon y muere cuando el proceso principal continúa.
+
+--- responder_stream() — llamada streaming ---
+
+El stream de Ollama es un generador que produce chunks uno a uno durante
+varios segundos. Un timeout "por llamada" no aplica aquí porque la llamada
+técnicamente "responde" desde el primer chunk.
+
+Solución: nuevo generador _stream_ollama(mensajes, opciones) que:
+  1. Lanza el loop de chunks en un hilo daemon.
+  2. El hilo deposita cada chunk en una queue.Queue(), o None al terminar,
+     o la excepción si ocurre algún error.
+  3. El generador principal lee de la queue con q.get(timeout=remaining),
+     donde remaining = deadline - time.monotonic() se recalcula en cada
+     iteración.
+  4. Si la queue está vacía y el deadline venció → TimeoutError.
+
+Esto significa que el timeout es un DEADLINE ABSOLUTO sobre toda la
+operación de streaming, no un timeout por chunk. Un chunk lento (GPU
+con alta carga) tiene hasta los 90s totales restantes, no 90s por chunk.
+
+responder_stream() ahora captura TimeoutError por separado:
+
+  except TimeoutError:
+      yield {"done": True,
+             "answer": "⏱️ El servidor tardó demasiado. Intenta de nuevo.",
+             ...}
+
+El usuario ve el mensaje inmediatamente en el chat en lugar de esperar.
+
+--- Parámetro OLLAMA_TIMEOUT ---
+
+Valor: 90 segundos.
+Justificación: en condiciones normales, una respuesta completa toma ~12-15s
+(85-100 tok/s × ~1000 tokens). 90s es 6x el tiempo normal, suficiente para
+absorber picos de carga de la GPU sin disparar falsos positivos, pero finito
+para cortar cuelgues reales.
+
+Añadido a config.example.py y aplicado en config.py del servidor.
+
+
+ARCHIVOS MODIFICADOS
+--------------------
+  rag.py            _chat(), nuevo _stream_ollama(), responder_stream()
+  config.example.py OLLAMA_TIMEOUT = 90
+  config.py         mismo valor aplicado en servidor phantom (en .gitignore)
+
+
+LIMITACIONES
+------------
+  - El hilo daemon que queda corriendo tras un timeout no puede cancelarse
+    en Python (los threads no son interrumpibles). Queda vivo hasta que
+    Ollama responde o cierra la conexión. En la práctica esto es aceptable:
+    el hilo no consume CPU activamente (está bloqueado en I/O) y muere
+    cuando el proceso Flask se reinicia.
+
+  - Si Ollama responde pero muy lento (GPU degradada, modelo en swap),
+    el sistema puede generar respuestas parciales antes de llegar a los 90s.
+    En ese caso se devuelve lo que llegó, que puede estar incompleto.
+    Este caso no está cubierto explícitamente pero es poco probable con el
+    hardware actual (2x RTX 3080).
+
+
+================================================================================
+FIN DEL DOCUMENTO
+================================================================================

@@ -28,6 +28,7 @@ OLLAMA_MODEL = "qwen2.5:3b"                       # SIN modo 'thinking': rápido
 OLLAMA_NUM_GPU = None   # None = usar GPU (auto). 0 = forzar CPU. Un nº = capas a GPU (offload parcial).
 OLLAMA_NUM_CTX = 4096   # ventana de contexto; 4096 va justo para 4 GB de VRAM (súbelo si tienes más)
 OLLAMA_NUM_PREDICT = 1024   # largo máx. de la respuesta (más alto = respuestas más detalladas)
+OLLAMA_TIMEOUT = 90         # segundos máx. para que Ollama responda (streaming o no); evita que Flask quede colgado
 
 # --------------------------------------------------------------------------- #
 # Parámetros de chunking y recuperación
@@ -36,6 +37,7 @@ CHUNK_SIZE = 600
 CHUNK_OVERLAP = 100
 TOP_K_RETRIEVE = 12
 TOP_K_RERANK = 5
+RERANKER_MIN_SCORE = 0.1   # umbral mínimo de relevancia [0-1]; docs por debajo se descartan antes del LLM
 MIN_OPINION_LEN = 40
 
 # --------------------------------------------------------------------------- #
@@ -58,7 +60,7 @@ CANDIDATOS = [
         "nombre": "Keiko Fujimori",
         "partido": "Fuerza Popular",
         "pdf": "da4b943d-4344-4743-9362-a11ccf3054cb.pdf",
-        "alias": ["keiko", "fujimori", "fuerza popular"],
+        "alias": ["keiko", "fujimori", "fuerza popular", "fujimorismo", "fujimorista", "señora k", "la k"],
         "youtube_videos": [],
         "reddit_queries": ["Keiko Fujimori", "Fuerza Popular"],
     },
@@ -82,7 +84,7 @@ CANDIDATOS = [
         "nombre": "Rafael López Aliaga",
         "partido": "Renovación Popular",
         "pdf": "2096b44a-f3b6-4c81-b03d-94fbfc9ac762.pdf",
-        "alias": ["lópez aliaga", "lopez aliaga", "renovación popular", "renovacion popular"],
+        "alias": ["lópez aliaga", "lopez aliaga", "renovación popular", "renovacion popular", "porky", "rpa"],
         "youtube_videos": [],
         "reddit_queries": ["López Aliaga", "Renovación Popular"],
     },

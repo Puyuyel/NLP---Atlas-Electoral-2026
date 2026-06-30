@@ -1,0 +1,116 @@
+================================================================================
+ATLAS ELECTORAL PERÚ 2026 — ACCESO AL SERVIDOR Y PROCEDIMIENTOS
+================================================================================
+
+TOPOLOGÍA
+---------
+  PC local  →  bridge (200.16.4.64, red PUCP)  →  phantom (172.19.4.64, interna)
+  Flask corre en phantom, puerto 5000, en screen 'atlas'.
+  Ollama corre en phantom, puerto 11435, en screen 'ollama-rh'.
+
+  Nota: la variable de entorno OLLAMA_HOST=http://127.0.0.1:11435 está definida
+  en ~/.profile de rholguin. El screen 'atlas' se inicia con 'bash -l' para
+  que la herede automáticamente (ver fix: mejora_d_ollama_host.txt).
+
+
+REQUISITOS PREVIOS (una sola vez por máquina)
+----------------------------------------------
+  pip install paramiko cryptography
+
+
+CREDENCIALES CIFRADAS (scripts/creds.enc)
+------------------------------------------
+  El archivo scripts/creds.enc está en el repo y es seguro de compartir —
+  sin la CLAVE DEL PROYECTO no revela nada (Fernet + PBKDF2, 480k iters).
+
+  La clave actual: atlas2026
+  (Cámbiala si es necesario con: py scripts/init_creds.py)
+
+  Para distribuir acceso a nuevos colaboradores:
+    1. Comparte la clave "atlas2026" por un canal fuera del repo
+       (mensaje directo, gestor de contraseñas compartido, etc.)
+    2. El colaborador clona el repo y tiene todo lo necesario.
+
+
+USO DÍA A DÍA — ACCESO A LA APP
+----------------------------------
+  Si estás en la RED PUCP:
+    Abre http://172.19.4.64:5000 directamente.
+
+  Si estás FUERA de la red PUCP:
+    1. Abrir una terminal y ejecutar:
+         py scripts/tunnel.py
+       (pide la clave del proyecto: atlas2026)
+
+    2. Dejar esa terminal abierta.
+
+    3. Abrir http://localhost:5000 en el navegador.
+
+    4. Al terminar, Ctrl+C en la terminal del tunel.
+
+
+DEPLOY — ACTUALIZAR LA UI
+--------------------------
+  Cuando se modifiquen templates/index.html, static/css/style.css
+  o static/js/app.js, ejecutar:
+
+    py scripts/deploy.py
+    (pide la clave del proyecto: atlas2026)
+
+  El script:
+    1. Verifica que los 3 archivos existen localmente.
+    2. Sube los archivos al servidor vía SFTP.
+    3. Mata el screen 'atlas' y lo reinicia con bash -l.
+    4. Espera 25s y muestra las últimas líneas del log de arranque.
+
+  Señal de deploy exitoso en el log:
+    Ollama listo.
+    Listo. Abre http://127.0.0.1:5000 en tu navegador.
+    * Running on http://172.19.4.64:5000
+
+
+ACCESO DIRECTO AL SERVIDOR (SSH)
+---------------------------------
+  Desde la red PUCP:
+    ssh rholguin@172.19.4.64   (pass: holguin)
+
+  Desde fuera (via bridge):
+    ssh -J bridge@200.16.4.64 rholguin@172.19.4.64
+    (bridge pass: h4l0h0m0r4pucp, phantom pass: holguin)
+
+  Ver log de Flask en tiempo real:
+    screen -r atlas            (Ctrl+A D para desconectarse sin matar)
+    tail -f /tmp/atlas.log
+
+  Ver estado de Ollama:
+    curl http://localhost:11435/api/tags
+
+
+ACTUALIZAR CREDENCIALES (solo administradores)
+-----------------------------------------------
+  Si cambian las credenciales del servidor:
+    1. Editar las constantes en scripts/init_creds.py
+    2. Ejecutar: py scripts/init_creds.py
+    3. Commitear el nuevo creds.enc
+    4. Informar la nueva clave al equipo fuera del repo
+
+
+RESOLUCIÓN DE PROBLEMAS
+------------------------
+  "Warmup Ollama falló" en el log:
+    → La variable OLLAMA_HOST no está disponible. Verificar que bash -l
+      la carga: ssh rholguin@172.19.4.64 -C 'echo $OLLAMA_HOST'
+    → Si está vacío: agregar 'export OLLAMA_HOST=http://127.0.0.1:11435'
+      al final de ~/.profile en phantom.
+
+  "model not found" en el chat:
+    → Verificar que Ollama está corriendo:
+      curl http://172.19.4.64:11435/api/tags
+    → Si el screen 'ollama-rh' no existe, reiniciarlo:
+      screen -dmS ollama-rh bash -c 'OLLAMA_HOST=http://127.0.0.1:11435 ollama serve'
+
+  Puerto 5000 ya en uso en localhost (tunnel.py):
+    → Matar el proceso anterior: taskkill /F /IM py.exe  (Windows)
+    → O cambiar 'local_port' a 5001 en scripts/init_creds.py y regenerar.
+
+================================================================================
