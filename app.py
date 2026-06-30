@@ -11,6 +11,7 @@ import io
 from flask import Flask, request, jsonify, Response, stream_with_context, render_template
 
 import config
+import traduccion
 from rag import RAG
 
 app = Flask(__name__)
@@ -42,8 +43,15 @@ def chat():
     pregunta = (data.get("pregunta") or "").strip()
     if not pregunta:
         return jsonify({"error": "Pregunta vacía"}), 400
+    es_qu = (data.get("lang") or "es").strip().lower() == "qu"
     try:
-        return jsonify(rag.responder(pregunta))
+        # Si el usuario está en quechua, traducimos su pregunta a español para el modelo.
+        pregunta_modelo = traduccion.a_espanol(pregunta) if es_qu else pregunta
+        res = rag.responder(pregunta_modelo)
+        # ...y la respuesta del modelo de vuelta al quechua.
+        if es_qu:
+            res["answer"] = traduccion.a_quechua(res.get("answer", ""))
+        return jsonify(res)
     except Exception as e:
         return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
 
@@ -55,13 +63,45 @@ def chat_stream():
     if not pregunta:
         return jsonify({"error": "Pregunta vacía"}), 400
     historial = data.get("historial") or []
+    es_qu = (data.get("lang") or "es").strip().lower() == "qu"
+
+    def sse(ev):
+        return f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
 
     def generate():
         try:
-            for evento in rag.responder_stream(pregunta, historial):
-                yield f"data: {json.dumps(evento, ensure_ascii=False)}\n\n"
+            if not es_qu:
+                # Camino español: streaming normal, token a token.
+                for evento in rag.responder_stream(pregunta, historial):
+                    yield sse(evento)
+                return
+
+            # Camino quechua: traducir entrada (y el historial) al español para el
+            # modelo, y la respuesta final al quechua. No se hace streaming de tokens
+            # porque la traducción se aplica sobre el texto completo.
+            yield sse({"status": "Maskaspa…"})  # "Buscando…"
+            pregunta_es = traduccion.a_espanol(pregunta)
+            historial_es = [{"role": m.get("role", ""),
+                             "content": traduccion.a_espanol(m.get("content", ""))}
+                            for m in historial]
+
+            answer_es, fuentes, candidato = "", [], None
+            for ev in rag.responder_stream(pregunta_es, historial_es):
+                if ev.get("error"):
+                    yield sse(ev)
+                    return
+                if ev.get("done"):
+                    answer_es = ev.get("answer", "")
+                    fuentes = ev.get("fuentes", [])
+                    candidato = ev.get("candidato")
+                # Los eventos de status/token intermedios se omiten en quechua.
+
+            yield sse({"status": "Qhichwaman tikrachispa…"})  # "Traduciendo al quechua…"
+            answer_qu = traduccion.a_quechua(answer_es)
+            yield sse({"done": True, "answer": answer_qu,
+                       "fuentes": fuentes, "candidato": candidato})
         except Exception as e:
-            yield f"data: {json.dumps({'error': f'{type(e).__name__}: {e}'}, ensure_ascii=False)}\n\n"
+            yield sse({"error": f"{type(e).__name__}: {e}"})
 
     return Response(
         stream_with_context(generate()),

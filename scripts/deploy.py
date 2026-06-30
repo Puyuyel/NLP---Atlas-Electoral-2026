@@ -3,8 +3,8 @@ Deploy de la UI al servidor phantom.
 
     py scripts/deploy.py
 
-Sube templates/index.html, static/css/style.css y static/js/app.js
-al servidor y reinicia el screen 'atlas' (Flask).
+Sube templates/index.html, static/css/style.css, static/js/app.js,
+app.py y traduccion.py al servidor y reinicia el screen 'atlas' (Flask).
 """
 import sys, time
 from pathlib import Path
@@ -19,6 +19,8 @@ FILES = [
     'templates/index.html',
     'static/css/style.css',
     'static/js/app.js',
+    'app.py',          # backend: maneja el parámetro lang (es/qu)
+    'traduccion.py',   # módulo de traducción ES<->quechua (requerido por app.py)
 ]
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
